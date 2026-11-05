@@ -63,15 +63,19 @@ fn normalize_engine_uri(raw: &str) -> String {
     s
 }
 
-/// Playlist source: explicit url, or derived from ACESTREAM_URI host
-/// (http://<engine host>:<ACESTREAM_PLAYLIST_PORT|80>/<ACESTREAM_PLAYLIST_PATH|playlist.m3u>).
-/// Derived only when ACESTREAM_URI is explicitly set.
+/// Playlist source, in priority order:
+/// 1. explicit ACESTREAM_PLAYLIST_URL (http(s)/file)
+/// 2. /data/playlist.m3u if the file is mounted (home_server convention)
+/// 3. derived from ACESTREAM_URI host: http://<host>:<port|80>/<path|playlist.m3u>
 fn playlist_url_from_env() -> Option<String> {
     if let Ok(u) = std::env::var("ACESTREAM_PLAYLIST_URL").or_else(|_| std::env::var("PLAYLIST_URL")) {
         let u = u.trim().to_string();
         if !u.is_empty() {
             return Some(u);
         }
+    }
+    if std::path::Path::new("/data/playlist.m3u").exists() {
+        return Some("file:///data/playlist.m3u".to_string());
     }
     let raw = std::env::var("ACESTREAM_URI")
         .or_else(|_| std::env::var("ENGINE_URL"))
