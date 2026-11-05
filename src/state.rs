@@ -149,7 +149,7 @@ impl App {
             .build()
             .expect("reqwest client");
         let transcodes = Transcodes::new(cfg.transcode_limit);
-        let playlist = PlaylistHistory::new(&cfg.tmp_dir);
+        let playlist = PlaylistHistory::new(&cfg.tmp_dir, cfg.playlist_ttl_secs);
         App {
             cfg,
             engine,
@@ -334,6 +334,6 @@ pub async fn janitor(app: Arc<App>) {
                 app.kill_stream(&s.id).await;
             }
         }
-        app.playlist.prune(app.cfg.playlist_ttl_secs);
+        app.playlist.ensure_fresh(app.cfg.playlist_ttl_secs);
     }
 }

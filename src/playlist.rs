@@ -161,21 +161,36 @@ fn to_m3u(chs: &[Channel]) -> String {
     out
 }
 
-/// Self-generated playlist: every started stream is remembered, persisted to
-/// TMP_DIR/playlist.m3u (survives restarts) and served via /api/channels,
-/// /playlist.m3u. Entries not started within TTL are pruned.
+/// Self-generated playlist: every started stream is remembered (in memory while
+/// running) and served via /api/channels, /playlist.m3u. TMP_DIR/playlist.m3u is
+/// a cache: valid for the TTL, then dropped and regenerated on the next request
+/// (only channels started/watched within the TTL survive).
 pub struct PlaylistHistory {
     pub channels: RwLock<Vec<Channel>>,
     path: PathBuf,
 }
 
+fn file_age_secs(p: &std::path::Path) -> Option<u64> {
+    let m = std::fs::metadata(p).ok()?;
+    let modified = m.modified().ok()?;
+    modified.elapsed().ok().map(|d| d.as_secs())
+}
+
 impl PlaylistHistory {
-    pub fn new(tmp_dir: &str) -> Self {
+    pub fn new(tmp_dir: &str, ttl_secs: u64) -> Self {
         let path = std::path::Path::new(tmp_dir).join("playlist.m3u");
-        let channels = std::fs::read_to_string(&path)
-            .map(|t| parse_m3u(&t))
-            .unwrap_or_default();
-        tracing::info!("playlist: {} saved channels from {}", channels.len(), path.display());
+        let channels = match file_age_secs(&path) {
+            // restart: the cached playlist lives for the TTL too
+            Some(age) if age < ttl_secs => std::fs::read_to_string(&path)
+                .map(|t| parse_m3u(&t))
+                .unwrap_or_default(),
+            Some(_) => {
+                let _ = std::fs::remove_file(&path); // expired: start clean
+                Vec::new()
+            }
+            None => Vec::new(),
+        };
+        tracing::info!("playlist: {} channels", channels.len());
         PlaylistHistory {
             channels: RwLock::new(channels),
             path,
@@ -221,21 +236,20 @@ impl PlaylistHistory {
         let _ = std::fs::write(&self.path, text);
     }
 
-    /// Drop channels not started within ttl. Called by the janitor.
-    pub fn prune(&self, ttl_secs: u64) {
+    /// Cache lifetime: when the cached playlist is older than ttl it is dropped
+    /// and rebuilt on this request, keeping only channels touched within the TTL.
+    pub fn ensure_fresh(&self, ttl_secs: u64) {
+        if matches!(file_age_secs(&self.path), Some(age) if age < ttl_secs) {
+            return;
+        }
         let now = now_secs();
         let mut chs = self.channels.write().unwrap();
-        let before = chs.len();
-        if now > ttl_secs {
-            chs.retain(|c| c.last_seen == 0 || now - c.last_seen < ttl_secs);
-        }
-        if chs.len() != before {
-            let removed = before - chs.len();
-            let text = to_m3u(&chs);
-            drop(chs);
-            let _ = std::fs::write(&self.path, text);
-            tracing::info!("playlist: pruned {removed} stale channels");
-        }
+        chs.retain(|c| now.saturating_sub(c.last_seen) < ttl_secs);
+        let text = to_m3u(&chs);
+        drop(chs);
+        let _ = std::fs::create_dir_all(self.path.parent().unwrap_or(std::path::Path::new(".")));
+        let _ = std::fs::write(&self.path, text); // recreated after TTL
+        tracing::info!("playlist: cache expired, regenerated");
     }
 }
 
@@ -262,13 +276,13 @@ mod tests {
     }
 
     #[test]
-    fn track_persist_roundtrip_and_prune() {
+    fn track_persist_roundtrip_and_ttl() {
         let dir = std::env::temp_dir().join(format!("acepl-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir_str = dir.to_str().unwrap().to_string();
 
-        let h = PlaylistHistory::new(&dir_str);
+        let h = PlaylistHistory::new(&dir_str, 3600);
         assert!(h.snapshot().is_empty());
         h.track("0123456789abcdef0123456789abcdef", Some("Матч"));
         h.track("0123456789abcdef0123456789abcdef", Some("Матч2")); // upsert rename
@@ -276,14 +290,23 @@ mod tests {
         assert_eq!(h.snapshot().len(), 2);
         assert_eq!(h.by_id(&h.snapshot()[0].id).unwrap().name, "Матч2");
 
-        // reload from disk (restart)
-        let h2 = PlaylistHistory::new(&dir_str);
+        // reload from disk while cache is fresh (restart)
+        let h2 = PlaylistHistory::new(&dir_str, 3600);
         assert_eq!(h2.snapshot().len(), 2);
         assert_eq!(h2.by_id(&h.snapshot()[0].id).unwrap().name, "Матч2");
 
-        // ttl prune: everything is fresh -> nothing dropped
-        h2.prune(3600);
+        // fresh cache: ensure_fresh keeps everything
+        h2.ensure_fresh(3600);
         assert_eq!(h2.snapshot().len(), 2);
+
+        // expired cache: only channels touched within ttl survive
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        h2.ensure_fresh(1);
+        assert!(h2.snapshot().is_empty(), "expired playlist regenerated empty");
+
+        // and restart with expired cache starts clean
+        let h3 = PlaylistHistory::new(&dir_str, 3600);
+        assert!(h3.snapshot().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

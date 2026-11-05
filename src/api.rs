@@ -257,6 +257,7 @@ pub async fn list_channels(
     State(app): State<Arc<App>>,
     Query(q): Query<ChannelsQuery>,
 ) -> Json<Vec<crate::playlist::Channel>> {
+    app.playlist.ensure_fresh(app.cfg.playlist_ttl_secs);
     let chans = app.playlist.snapshot();
     Json(
         chans
@@ -285,6 +286,7 @@ pub async fn list_channels(
 
 #[utoipa::path(get, path = "/api/channels/groups", responses((status = 200, body = [GroupInfo])))]
 pub async fn list_groups(State(app): State<Arc<App>>) -> Json<Vec<GroupInfo>> {
+    app.playlist.ensure_fresh(app.cfg.playlist_ttl_secs);
     let chans = app.playlist.snapshot();
     let mut m: BTreeMap<String, u32> = BTreeMap::new();
     for c in chans.iter() {
