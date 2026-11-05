@@ -17,12 +17,10 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 pub struct Config {
-    /// Ace Stream Engine HTTP API base (e.g. http://acestream:6878)
+    /// Ace Stream Engine host (ip or dns, scheme/port optional)
     pub engine_url: String,
     pub port: u16,
-    /// Remote m3u playlist to import (channels, groups)
-    pub playlist_url: Option<String>,
-    /// How long a loaded playlist stays before refresh (retry every 60s on failure)
+    /// Channels not started within this TTL are pruned from the playlist
     pub playlist_ttl_secs: u64,
     /// Kill a stream after this many seconds without clients
     pub idle_secs: u64,
@@ -64,34 +62,6 @@ fn normalize_engine_uri(raw: &str) -> String {
     s
 }
 
-/// Playlist source, in priority order:
-/// 1. explicit ACESTREAM_PLAYLIST_URL (http(s)/file)
-/// 2. /data/playlist.m3u if the file is mounted (home_server convention)
-/// 3. derived from ACESTREAM_URI host: http://<host>:<port|80>/<path|playlist.m3u>
-fn playlist_url_from_env() -> Option<String> {
-    if let Ok(u) = std::env::var("ACESTREAM_PLAYLIST_URL").or_else(|_| std::env::var("PLAYLIST_URL")) {
-        let u = u.trim().to_string();
-        if !u.is_empty() {
-            return Some(u);
-        }
-    }
-    if std::path::Path::new("/data/playlist.m3u").exists() {
-        return Some("file:///data/playlist.m3u".to_string());
-    }
-    let raw = std::env::var("ACESTREAM_URI")
-        .or_else(|_| std::env::var("ENGINE_URL"))
-        .ok()?;
-    let uri = normalize_engine_uri(&raw);
-    let (scheme, rest) = uri.split_once("://")?;
-    let host = rest.split(['/', '?']).next()?.split(':').next()?;
-    if host.is_empty() {
-        return None;
-    }
-    let port = envs("ACESTREAM_PLAYLIST_PORT", "80");
-    let path = envs("ACESTREAM_PLAYLIST_PATH", "playlist.m3u");
-    Some(format!("{scheme}://{host}:{port}/{path}"))
-}
-
 impl Config {
     fn from_env() -> Self {
         Config {
@@ -100,13 +70,9 @@ impl Config {
                 &envs("ENGINE_URL", "http://127.0.0.1:6878"),
             )),
             port: envs("PORT", "8080").parse().unwrap_or(8080),
-            playlist_url: playlist_url_from_env(),
-            playlist_ttl_secs: envs(
-                "ACESTREAM_PLAYLIST_TTL_SECS",
-                &envs("PLAYLIST_REFRESH_SECS", "21600"),
-            )
-            .parse()
-            .unwrap_or(21600),
+            playlist_ttl_secs: envs("ACESTREAM_PLAYLIST_TTL_SECS", "21600")
+                .parse()
+                .unwrap_or(21600),
             idle_secs: envs("STREAM_IDLE_SECS", "30").parse().unwrap_or(30),
             stale_secs: envs("CLIENT_STALE_SECS", "60").parse().unwrap_or(60),
             transcode_limit: envs("TRANSCODE_LIMIT", "")
@@ -152,10 +118,6 @@ async fn main() {
     let port = cfg.port;
     let app = Arc::new(App::new(cfg));
 
-    if app.cfg.playlist_url.is_some() {
-        let a = Arc::clone(&app);
-        tokio::spawn(playlist::refresh_loop(a));
-    }
     {
         let a = Arc::clone(&app);
         tokio::spawn(janitor(a));

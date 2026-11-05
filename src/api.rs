@@ -48,8 +48,10 @@ pub struct StreamInfo {
 
 #[derive(Deserialize, ToSchema)]
 pub struct StartStreamReq {
-    /// Content id (32 hex), acestream://..., magnet:..., http(s)://... or playlist channel id
+    /// Content id (32 hex), acestream://..., magnet:..., http(s)://...
     pub content: String,
+    /// Optional channel name for the playlist (defaults to content)
+    pub name: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -155,6 +157,9 @@ pub async fn start_stream(
         .get_or_start(&req.content)
         .await
         .map_err(|m| e(StatusCode::BAD_REQUEST, m))?;
+    if req.name.is_some() {
+        app.playlist.track(&s.content, req.name.as_deref());
+    }
     Ok(Json(stream_info(&s)))
 }
 
@@ -252,7 +257,7 @@ pub async fn list_channels(
     State(app): State<Arc<App>>,
     Query(q): Query<ChannelsQuery>,
 ) -> Json<Vec<crate::playlist::Channel>> {
-    let chans = app.playlist.channels.read().unwrap().clone();
+    let chans = app.playlist.snapshot();
     Json(
         chans
             .into_iter()
@@ -280,7 +285,7 @@ pub async fn list_channels(
 
 #[utoipa::path(get, path = "/api/channels/groups", responses((status = 200, body = [GroupInfo])))]
 pub async fn list_groups(State(app): State<Arc<App>>) -> Json<Vec<GroupInfo>> {
-    let chans = app.playlist.channels.read().unwrap();
+    let chans = app.playlist.snapshot();
     let mut m: BTreeMap<String, u32> = BTreeMap::new();
     for c in chans.iter() {
         *m.entry(c.group.clone()).or_insert(0) += 1;

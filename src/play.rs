@@ -263,7 +263,7 @@ pub async fn playlist_m3u(
     let esc = |s: &str| s.replace('"', "'");
     let transcode = q.get("mode").map(|m| m.as_str() == "transcode").unwrap_or(false);
     let mut out = String::from("#EXTM3U\n");
-    for ch in app.playlist.channels.read().unwrap().iter() {
+    for ch in app.playlist.snapshot().iter() {
         out.push_str(&format!(
             "#EXTINF:-1 tvg-id=\"{}\" tvg-logo=\"{}\" group-title=\"{}\",{}\n",
             ch.tvg_id.as_deref().unwrap_or(""),

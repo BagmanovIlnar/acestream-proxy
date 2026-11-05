@@ -1,9 +1,8 @@
 use crate::util::content_id;
 use serde::Serialize;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::RwLock;
-use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 use utoipa::ToSchema;
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
@@ -11,68 +10,49 @@ pub struct Channel {
     /// Stable id (use in /stream/{id}, /play/{id})
     pub id: String,
     pub name: String,
-    /// Source url / content id (what gets sent to the engine)
+    /// Content id / url / magnet (what gets sent to the engine)
     pub url: String,
     pub group: String,
     pub logo: Option<String>,
     #[serde(rename = "tvgId", alias = "tvg-id")]
     pub tvg_id: Option<String>,
     pub country: Option<String>,
+    #[serde(skip)]
+    /// unix secs of last start; persisted via x-last attr, used for TTL prune
+    pub last_seen: u64,
 }
 
-#[derive(Default)]
-pub struct PlaylistCache {
-    pub channels: RwLock<Vec<Channel>>,
-    /// Local copy in TMP_DIR — survives restarts without refetch.
-    cache_path: Option<PathBuf>,
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
-impl PlaylistCache {
-    pub fn new(tmp_dir: &str) -> Self {
-        PlaylistCache {
-            channels: RwLock::new(Vec::new()),
-            cache_path: Some(std::path::Path::new(tmp_dir).join("playlist.m3u")),
-        }
+/// Pretty default name for a content string.
+fn default_name(content: &str) -> String {
+    let bare = content.trim().trim_start_matches("acestream://");
+    if bare.len() == 32 && bare.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return format!("Канал {}", &bare[..8]);
     }
+    let last = bare.rsplit(['/']).next().unwrap_or(bare);
+    let last = last.split('?').next().unwrap_or(last);
+    if last.is_empty() {
+        crate::util::truncate(bare, 40)
+    } else {
+        crate::util::truncate(last, 40)
+    }
+}
 
-    pub fn by_id(&self, id: &str) -> Option<Channel> {
-        self.channels
-            .read()
-            .unwrap()
-            .iter()
-            .find(|c| c.id == id)
-            .cloned()
-    }
-
-    pub fn set(&self, m3u_text: &str) -> usize {
-        let chans = parse_m3u(m3u_text);
-        let n = chans.len();
-        *self.channels.write().unwrap() = chans;
-        if let Some(p) = &self.cache_path {
-            let _ = std::fs::create_dir_all(p.parent().unwrap_or(std::path::Path::new(".")));
-            let _ = std::fs::write(p, m3u_text); // best-effort cache
-        }
-        n
-    }
-
-    /// Load the cached copy at startup (may be stale; background refresh fixes it).
-    pub fn load_from_disk(&self) -> bool {
-        let Some(p) = &self.cache_path else { return false };
-        match std::fs::read_to_string(p) {
-            Ok(t) => {
-                *self.channels.write().unwrap() = parse_m3u(&t);
-                true
-            }
-            Err(_) => false,
-        }
-    }
+fn non_empty(m: &std::collections::HashMap<String, String>, k: &str) -> Option<String> {
+    m.get(k).cloned().filter(|v| !v.is_empty())
 }
 
 /// Parse attrs of the form key="value" (or key=value), space separated.
-fn parse_attrs(s: &str) -> HashMap<String, String> {
+fn parse_attrs(s: &str) -> std::collections::HashMap<String, String> {
     let b: Vec<char> = s.chars().collect();
     let n = b.len();
-    let mut m = HashMap::new();
+    let mut m = std::collections::HashMap::new();
     let mut i = 0;
     while i < n {
         while i < n && b[i] == ' ' {
@@ -109,21 +89,16 @@ fn parse_attrs(s: &str) -> HashMap<String, String> {
     m
 }
 
-fn non_empty(m: &HashMap<String, String>, k: &str) -> Option<String> {
-    m.get(k).cloned().filter(|v| !v.is_empty())
-}
-
+/// Parse m3u text (also used to load our own persisted playlist).
 pub fn parse_m3u(text: &str) -> Vec<Channel> {
     let mut out = Vec::new();
-    let mut pending: Option<(HashMap<String, String>, String)> = None;
-
+    let mut pending: Option<(std::collections::HashMap<String, String>, String)> = None;
     for line in text.lines() {
         let l = line.trim();
         if l.is_empty() || l.starts_with("#EXTM3U") {
             continue;
         }
         if let Some(rest) = l.strip_prefix("#EXTINF") {
-            // find first comma outside quotes: attrs,Name
             let rest = rest.strip_prefix(':').unwrap_or(rest);
             let mut in_q = false;
             let mut comma = None;
@@ -145,64 +120,122 @@ pub fn parse_m3u(text: &str) -> Vec<Channel> {
             continue;
         }
         if l.starts_with('#') {
-            continue; // other directives ignored
+            continue;
         }
-        // url line
         let url = l.to_string();
         let (attrs, name) = pending.take().unwrap_or_default();
         let id = content_id(&url);
         let name = if name.is_empty() {
-            format!("Channel {}", &id[..4.min(id.len())])
+            default_name(&url)
         } else {
             name
         };
         out.push(Channel {
             id,
             name,
-            url: url.clone(),
-            group: non_empty(&attrs, "group-title").unwrap_or_else(|| "Без группы".into()),
+            url,
+            group: non_empty(&attrs, "group-title").unwrap_or_else(|| "Мои".into()),
             logo: non_empty(&attrs, "tvg-logo"),
             tvg_id: non_empty(&attrs, "tvg-id"),
             country: non_empty(&attrs, "tvg-country"),
+            last_seen: non_empty(&attrs, "x-last")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
         });
     }
     out
 }
 
-/// Periodically (re)load the playlist from its source (http(s):// or file:///path)
-/// into memory + local cache. On success waits TTL, on failure retries in 60s.
-pub async fn refresh_loop(app: std::sync::Arc<crate::state::App>) {
-    let Some(src) = app.cfg.playlist_url.clone() else {
-        return;
-    };
-    loop {
-        let fetched = if let Some(path) = src.strip_prefix("file://") {
-            tokio::fs::read_to_string(path).await.map_err(|e| format!("{e}"))
+fn to_m3u(chs: &[Channel]) -> String {
+    let esc = |s: &str| s.replace('"', "'");
+    let mut out = String::from("#EXTM3U\n");
+    for c in chs {
+        out.push_str(&format!(
+            "#EXTINF:-1 x-last=\"{}\" group-title=\"{}\",{}\n{}\n",
+            c.last_seen,
+            esc(&c.group),
+            esc(&c.name),
+            c.url
+        ));
+    }
+    out
+}
+
+/// Self-generated playlist: every started stream is remembered, persisted to
+/// TMP_DIR/playlist.m3u (survives restarts) and served via /api/channels,
+/// /playlist.m3u. Entries not started within TTL are pruned.
+pub struct PlaylistHistory {
+    pub channels: RwLock<Vec<Channel>>,
+    path: PathBuf,
+}
+
+impl PlaylistHistory {
+    pub fn new(tmp_dir: &str) -> Self {
+        let path = std::path::Path::new(tmp_dir).join("playlist.m3u");
+        let channels = std::fs::read_to_string(&path)
+            .map(|t| parse_m3u(&t))
+            .unwrap_or_default();
+        tracing::info!("playlist: {} saved channels from {}", channels.len(), path.display());
+        PlaylistHistory {
+            channels: RwLock::new(channels),
+            path,
+        }
+    }
+
+    pub fn snapshot(&self) -> Vec<Channel> {
+        self.channels.read().unwrap().clone()
+    }
+
+    pub fn by_id(&self, id: &str) -> Option<Channel> {
+        self.channels.read().unwrap().iter().find(|c| c.id == id).cloned()
+    }
+
+    /// Remember/refresh a started stream (upsert by content). Rewrites the m3u file.
+    pub fn track(&self, content: &str, name: Option<&str>) {
+        let id = content_id(content);
+        let now = now_secs();
+        let mut chs = self.channels.write().unwrap();
+        if let Some(c) = chs.iter_mut().find(|c| c.id == id) {
+            c.last_seen = now;
+            if let Some(n) = name {
+                if !n.trim().is_empty() {
+                    c.name = n.trim().to_string();
+                }
+            }
         } else {
-            match app
-                .http
-                .get(&src)
-                .timeout(Duration::from_secs(60))
-                .send()
-                .await
-            {
-                Ok(r) if r.status().is_success() => r.text().await.map_err(|e| format!("{e}")),
-                Ok(r) => Err(format!("http {}", r.status())),
-                Err(e) => Err(e.to_string()),
-            }
-        };
-        let wait = match fetched {
-            Ok(t) => {
-                let n = app.playlist.set(&t);
-                tracing::info!("playlist loaded: {n} channels");
-                Duration::from_secs(app.cfg.playlist_ttl_secs)
-            }
-            Err(e) => {
-                tracing::warn!("playlist load error: {e} (retry in 60s)");
-                Duration::from_secs(60)
-            }
-        };
-        tokio::time::sleep(wait).await;
+            chs.push(Channel {
+                id,
+                name: name.map(str::trim).filter(|n| !n.is_empty()).map(String::from).unwrap_or_else(|| default_name(content)),
+                url: content.to_string(),
+                group: "Мои".into(),
+                logo: None,
+                tvg_id: None,
+                country: None,
+                last_seen: now,
+            });
+            tracing::info!("playlist: added channel '{}'", chs.last().unwrap().name);
+        }
+        let text = to_m3u(&chs);
+        drop(chs);
+        let _ = std::fs::create_dir_all(self.path.parent().unwrap_or(std::path::Path::new(".")));
+        let _ = std::fs::write(&self.path, text);
+    }
+
+    /// Drop channels not started within ttl. Called by the janitor.
+    pub fn prune(&self, ttl_secs: u64) {
+        let now = now_secs();
+        let mut chs = self.channels.write().unwrap();
+        let before = chs.len();
+        if now > ttl_secs {
+            chs.retain(|c| c.last_seen == 0 || now - c.last_seen < ttl_secs);
+        }
+        if chs.len() != before {
+            let removed = before - chs.len();
+            let text = to_m3u(&chs);
+            drop(chs);
+            let _ = std::fs::write(&self.path, text);
+            tracing::info!("playlist: pruned {removed} stale channels");
+        }
     }
 }
 
@@ -229,9 +262,28 @@ mod tests {
     }
 
     #[test]
-    fn no_attrs_line() {
-        let chans = parse_m3u("#EXTM3U\n#EXTINF:-1,Name\n0123456789abcdef0123456789abcdef\n");
-        assert_eq!(chans[0].name, "Name");
-        assert_eq!(chans[0].group, "Без группы");
+    fn track_persist_roundtrip_and_prune() {
+        let dir = std::env::temp_dir().join(format!("acepl-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+
+        let h = PlaylistHistory::new(&dir_str);
+        assert!(h.snapshot().is_empty());
+        h.track("0123456789abcdef0123456789abcdef", Some("Матч"));
+        h.track("0123456789abcdef0123456789abcdef", Some("Матч2")); // upsert rename
+        h.track("http://x.ru/a.acelive", None); // default name from url
+        assert_eq!(h.snapshot().len(), 2);
+        assert_eq!(h.by_id(&h.snapshot()[0].id).unwrap().name, "Матч2");
+
+        // reload from disk (restart)
+        let h2 = PlaylistHistory::new(&dir_str);
+        assert_eq!(h2.snapshot().len(), 2);
+        assert_eq!(h2.by_id(&h.snapshot()[0].id).unwrap().name, "Матч2");
+
+        // ttl prune: everything is fresh -> nothing dropped
+        h2.prune(3600);
+        assert_eq!(h2.snapshot().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

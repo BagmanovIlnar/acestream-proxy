@@ -22,7 +22,7 @@
 - **Браузерное воспроизведение**: `GET /play/{id}/master.m3u8`
   - кодеки браузерные (h264+aac/mp3) → редирект на HLS движка (0 CPU)
   - иначе → транскод ffmpeg (h264+aac), все аудиодорожки — как alternate AUDIO renditions в master-плейлисте (hls.js переключает через `hls.audioTrack`)
-- **Плейлист со всеми каналами**: `GET /playlist.m3u` — url ведут на прокси, категории через `group-title`; `?mode=transcode` — ссылки сразу на транскод (H.264+AAC HLS для слабых устройств)
+- **Плейлист генерируется сам**: каждый запущенный канал (через Web UI, `POST /api/streams` или `/stream/{id}`) запоминается и сохраняется в `TMP_DIR/playlist.m3u` (переживает рестарты); имя задаётся в `POST /api/streams` (`{"content":"...","name":"Матч ТВ"}`). Каналы, не запускавшиеся дольше `ACESTREAM_PLAYLIST_TTL_SECS`, удаляются. Отдача: `/api/channels` и `/playlist.m3u` (с категориями)
 - **API + Swagger**: `http://localhost:8080/swagger-ui`
 - Автоочистка: стрим без зрителей гаснет через `STREAM_IDLE_SECS`; HLS/браузерные клиенты без запросов дропаются через `CLIENT_STALE_SECS`
 
@@ -30,8 +30,6 @@
 
 ```bash
 docker compose up --build
-# с плейлистом:
-PLAYLIST_URL="https://example.com/playlist.m3u" docker compose up --build
 ```
 
 `ENGINE_URL` должен указывать на HTTP API уже работающего движка (например `http://host.docker.internal:6878` или IP хоста/контейнера с движком).
@@ -47,10 +45,8 @@ ENGINE_URL=http://127.0.0.1:6878 ./target/release/acestream-proxy
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
-| `ACESTREAM_URI` | `127.0.0.1` | движок: ip или dns, схема/порт не обязательны. Когда задан явно, плейлист по умолчанию берётся с `http://<хост>:80/playlist.m3u` |
-| `ACESTREAM_PLAYLIST_URL` | — | источник плейлиста: `http(s)://...` или `file:///...`. Качается в свой `TMP_DIR`, хранится там, переживает рестарт |
-| `ACESTREAM_PLAYLIST_TTL_SECS` | `21600` (6ч) | срок жизни плейлиста до обновления; при ошибке загрузки retry каждые 60с |
-| `PLAYLIST_REFRESH_SECS` | `1800` | период обновления плейлиста |
+| `ACESTREAM_URI` | `127.0.0.1` | движок: ip или dns, схема/порт не обязательны (`192.168.1.37`, `acestream-engine`, `host.lan:6878`) |
+| `ACESTREAM_PLAYLIST_TTL_SECS` | `21600` (6ч) | канал живёт в плейлисте столько, сколько его не запускали |
 | `STREAM_IDLE_SECS` | `30` | сколько стрим живёт без зрителей |
 | `CLIENT_STALE_SECS` | `60` | HLS/браузер-клиент считается ушедшим |
 | `TRANSCODE_LIMIT` | кол-во ядер | максимум одновременных транскодов |

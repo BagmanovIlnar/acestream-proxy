@@ -1,5 +1,5 @@
 use crate::engine::{Engine, EngineStream};
-use crate::playlist::PlaylistCache;
+use crate::playlist::PlaylistHistory;
 use crate::transcode::{CodecInfo, Transcodes};
 use crate::util::{content_id, fnv64};
 use bytes::Bytes;
@@ -137,7 +137,7 @@ pub struct App {
     pub engine: Engine,
     pub http: reqwest::Client,
     pub streams: RwLock<HashMap<String, Arc<Stream>>>,
-    pub playlist: PlaylistCache,
+    pub playlist: PlaylistHistory,
     pub transcodes: Transcodes,
 }
 
@@ -149,8 +149,7 @@ impl App {
             .build()
             .expect("reqwest client");
         let transcodes = Transcodes::new(cfg.transcode_limit);
-        let playlist = PlaylistCache::new(&cfg.tmp_dir);
-        playlist.load_from_disk(); // serve stale cache instantly; background refresh updates it
+        let playlist = PlaylistHistory::new(&cfg.tmp_dir);
         App {
             cfg,
             engine,
@@ -221,6 +220,8 @@ impl App {
         if Arc::ptr_eq(&winner, &s) {
             tracing::info!(stream = %id, content = %content, "stream started");
         }
+        // self-generated playlist: remember every started stream
+        self.playlist.track(&content, None);
         Ok(winner)
     }
 
@@ -333,5 +334,6 @@ pub async fn janitor(app: Arc<App>) {
                 app.kill_stream(&s.id).await;
             }
         }
+        app.playlist.prune(app.cfg.playlist_ttl_secs);
     }
 }
