@@ -111,6 +111,45 @@ impl Engine {
             Err(e) => Err(e.to_string()),
         }
     }
+
+    /// Search public p2p broadcasts in the Ace Stream network via the engine's
+    /// /server/api (get_api_access_token + method=search).
+    pub async fn search(&self, q: Option<&str>) -> Result<serde_json::Value, String> {
+        let tok_url = format!("{}/server/api?method=get_api_access_token", self.base);
+        let tok_resp: serde_json::Value = self
+            .http
+            .get(&tok_url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| format!("token request failed: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("token response: {e}"))?;
+        let token = tok_resp
+            .get("token")
+            .and_then(|t| t.as_str())
+            .or_else(|| tok_resp.pointer("/result/token").and_then(|t| t.as_str()))
+            .ok_or_else(|| "engine returned no api token".to_string())?
+            .to_string();
+        let mut search_url = format!(
+            "{}/server/api?method=search&token={}",
+            self.base,
+            urlencode(&token)
+        );
+        if let Some(q) = q.filter(|q| !q.trim().is_empty()) {
+            search_url.push_str(&format!("&q={}", urlencode(q.trim())));
+        }
+        self.http
+            .get(&search_url)
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(|e| format!("search request failed: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("search response: {e}"))
+    }
 }
 
 #[cfg(test)]

@@ -95,6 +95,55 @@ pub struct ChannelsQuery {
     pub country: Option<String>,
 }
 
+#[derive(Deserialize, IntoParams)]
+pub struct SearchQuery {
+    /// Search text (empty = default/popular list)
+    pub q: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SearchItem {
+    pub name: String,
+    /// Content id — pass to POST /api/streams or /stream/{id}
+    pub content_id: String,
+    pub bitrate: Option<u64>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SearchResult {
+    pub items: Vec<SearchItem>,
+    /// Raw engine response (fields may vary by engine version)
+    pub raw: serde_json::Value,
+}
+
+fn extract_search_items(v: &serde_json::Value) -> Vec<SearchItem> {
+    let arr = v
+        .pointer("/result/results")
+        .and_then(|x| x.as_array())
+        .or_else(|| v.get("results").and_then(|x| x.as_array()))
+        .cloned()
+        .unwrap_or_default();
+    arr.iter()
+        .filter_map(|i| {
+            let cid = i
+                .get("content_id")
+                .and_then(|x| x.as_str())
+                .or_else(|| i.get("id").and_then(|x| x.as_str()))?;
+            let name = i
+                .get("name")
+                .and_then(|x| x.as_str())
+                .or_else(|| i.get("title").and_then(|x| x.as_str()))
+                .unwrap_or(cid)
+                .to_string();
+            Some(SearchItem {
+                name,
+                content_id: cid.to_string(),
+                bitrate: i.get("bitrate").and_then(|x| x.as_u64()),
+            })
+        })
+        .collect()
+}
+
 fn stream_info(s: &Stream) -> StreamInfo {
     let now = Instant::now();
     let clients = s
@@ -295,6 +344,27 @@ pub async fn list_groups(State(app): State<Arc<App>>) -> Json<Vec<GroupInfo>> {
     Json(m.into_iter().map(|(name, count)| GroupInfo { name, count }).collect())
 }
 
+#[utoipa::path(
+    get, path = "/api/search",
+    params(SearchQuery),
+    responses(
+        (status = 200, body = SearchResult, description = "Публичные трансляции сети Ace Stream (поиск движка)"),
+        (status = 502, description = "движок не отдал ответ")
+    )
+)]
+pub async fn search(
+    State(app): State<Arc<App>>,
+    Query(q): Query<SearchQuery>,
+) -> Result<Json<SearchResult>, ApiError> {
+    let raw = app
+        .engine
+        .search(q.q.as_deref())
+        .await
+        .map_err(|m| e(StatusCode::BAD_GATEWAY, m))?;
+    let items = extract_search_items(&raw);
+    Ok(Json(SearchResult { items, raw }))
+}
+
 pub fn router() -> axum::Router<Arc<App>> {
     use axum::routing::get;
     axum::Router::new()
@@ -305,4 +375,5 @@ pub fn router() -> axum::Router<Arc<App>> {
         .route("/clients", get(list_clients))
         .route("/channels", get(list_channels))
         .route("/channels/groups", get(list_groups))
+        .route("/search", get(search))
 }

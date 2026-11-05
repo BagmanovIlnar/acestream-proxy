@@ -91,12 +91,12 @@ impl Config {
     paths(
         api::health, api::start_stream, api::list_streams, api::get_stream,
         api::delete_stream, api::stream_audio, api::list_clients,
-        api::list_channels, api::list_groups,
+        api::list_channels, api::list_groups, api::search,
     ),
     components(schemas(
         api::HealthInfo, api::StartStreamReq, api::StreamInfo, api::ClientInfo,
         api::AudioInfo, api::ClientRow, api::GroupInfo, playlist::Channel,
-        transcode::AudioTrack,
+        transcode::AudioTrack, api::SearchItem, api::SearchResult,
     )),
     tags(
         (name = "streams", description = "Активные трансляции"),
