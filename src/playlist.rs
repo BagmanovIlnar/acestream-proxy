@@ -1,6 +1,7 @@
 use crate::util::content_id;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::RwLock;
 use std::time::Duration;
 use utoipa::ToSchema;
@@ -22,9 +23,18 @@ pub struct Channel {
 #[derive(Default)]
 pub struct PlaylistCache {
     pub channels: RwLock<Vec<Channel>>,
+    /// Local copy in TMP_DIR — survives restarts without refetch.
+    cache_path: Option<PathBuf>,
 }
 
 impl PlaylistCache {
+    pub fn new(tmp_dir: &str) -> Self {
+        PlaylistCache {
+            channels: RwLock::new(Vec::new()),
+            cache_path: Some(std::path::Path::new(tmp_dir).join("playlist.m3u")),
+        }
+    }
+
     pub fn by_id(&self, id: &str) -> Option<Channel> {
         self.channels
             .read()
@@ -38,7 +48,23 @@ impl PlaylistCache {
         let chans = parse_m3u(m3u_text);
         let n = chans.len();
         *self.channels.write().unwrap() = chans;
+        if let Some(p) = &self.cache_path {
+            let _ = std::fs::create_dir_all(p.parent().unwrap_or(std::path::Path::new(".")));
+            let _ = std::fs::write(p, m3u_text); // best-effort cache
+        }
         n
+    }
+
+    /// Load the cached copy at startup (may be stale; background refresh fixes it).
+    pub fn load_from_disk(&self) -> bool {
+        let Some(p) = &self.cache_path else { return false };
+        match std::fs::read_to_string(p) {
+            Ok(t) => {
+                *self.channels.write().unwrap() = parse_m3u(&t);
+                true
+            }
+            Err(_) => false,
+        }
     }
 }
 
@@ -143,7 +169,8 @@ pub fn parse_m3u(text: &str) -> Vec<Channel> {
     out
 }
 
-/// Periodically (re)load the playlist from PLAYLIST_URL (http(s):// or file:///path).
+/// Periodically (re)load the playlist from its source (http(s):// or file:///path)
+/// into memory + local cache. On success waits TTL, on failure retries in 60s.
 pub async fn refresh_loop(app: std::sync::Arc<crate::state::App>) {
     let Some(src) = app.cfg.playlist_url.clone() else {
         return;
@@ -164,14 +191,18 @@ pub async fn refresh_loop(app: std::sync::Arc<crate::state::App>) {
                 Err(e) => Err(e.to_string()),
             }
         };
-        match fetched {
+        let wait = match fetched {
             Ok(t) => {
                 let n = app.playlist.set(&t);
                 tracing::info!("playlist loaded: {n} channels");
+                Duration::from_secs(app.cfg.playlist_ttl_secs)
             }
-            Err(e) => tracing::warn!("playlist load error: {e}"),
-        }
-        tokio::time::sleep(Duration::from_secs(app.cfg.playlist_refresh_secs)).await;
+            Err(e) => {
+                tracing::warn!("playlist load error: {e} (retry in 60s)");
+                Duration::from_secs(60)
+            }
+        };
+        tokio::time::sleep(wait).await;
     }
 }
 

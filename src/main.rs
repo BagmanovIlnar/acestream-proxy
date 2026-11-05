@@ -22,7 +22,8 @@ pub struct Config {
     pub port: u16,
     /// Remote m3u playlist to import (channels, groups)
     pub playlist_url: Option<String>,
-    pub playlist_refresh_secs: u64,
+    /// How long a loaded playlist stays before refresh (retry every 60s on failure)
+    pub playlist_ttl_secs: u64,
     /// Kill a stream after this many seconds without clients
     pub idle_secs: u64,
     /// HLS/browser client considered gone after this many seconds without requests
@@ -100,7 +101,12 @@ impl Config {
             )),
             port: envs("PORT", "8080").parse().unwrap_or(8080),
             playlist_url: playlist_url_from_env(),
-            playlist_refresh_secs: envs("PLAYLIST_REFRESH_SECS", "1800").parse().unwrap_or(1800),
+            playlist_ttl_secs: envs(
+                "ACESTREAM_PLAYLIST_TTL_SECS",
+                &envs("PLAYLIST_REFRESH_SECS", "21600"),
+            )
+            .parse()
+            .unwrap_or(21600),
             idle_secs: envs("STREAM_IDLE_SECS", "30").parse().unwrap_or(30),
             stale_secs: envs("CLIENT_STALE_SECS", "60").parse().unwrap_or(60),
             transcode_limit: envs("TRANSCODE_LIMIT", "")

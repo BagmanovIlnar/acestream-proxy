@@ -149,12 +149,14 @@ impl App {
             .build()
             .expect("reqwest client");
         let transcodes = Transcodes::new(cfg.transcode_limit);
+        let playlist = PlaylistCache::new(&cfg.tmp_dir);
+        playlist.load_from_disk(); // serve stale cache instantly; background refresh updates it
         App {
             cfg,
             engine,
             http,
             streams: RwLock::new(HashMap::new()),
-            playlist: PlaylistCache::default(),
+            playlist,
             transcodes,
         }
     }
