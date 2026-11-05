@@ -143,28 +143,33 @@ pub fn parse_m3u(text: &str) -> Vec<Channel> {
     out
 }
 
-/// Periodically (re)load the playlist from PLAYLIST_URL.
+/// Periodically (re)load the playlist from PLAYLIST_URL (http(s):// or file:///path).
 pub async fn refresh_loop(app: std::sync::Arc<crate::state::App>) {
-    let Some(url) = app.cfg.playlist_url.clone() else {
+    let Some(src) = app.cfg.playlist_url.clone() else {
         return;
     };
     loop {
-        match app
-            .http
-            .get(&url)
-            .timeout(Duration::from_secs(60))
-            .send()
-            .await
-        {
-            Ok(r) if r.status().is_success() => match r.text().await {
-                Ok(t) => {
-                    let n = app.playlist.set(&t);
-                    tracing::info!("playlist loaded: {n} channels");
-                }
-                Err(e) => tracing::warn!("playlist read error: {e}"),
-            },
-            Ok(r) => tracing::warn!("playlist fetch http {}", r.status()),
-            Err(e) => tracing::warn!("playlist fetch error: {e}"),
+        let fetched = if let Some(path) = src.strip_prefix("file://") {
+            tokio::fs::read_to_string(path).await.map_err(|e| format!("{e}"))
+        } else {
+            match app
+                .http
+                .get(&src)
+                .timeout(Duration::from_secs(60))
+                .send()
+                .await
+            {
+                Ok(r) if r.status().is_success() => r.text().await.map_err(|e| format!("{e}")),
+                Ok(r) => Err(format!("http {}", r.status())),
+                Err(e) => Err(e.to_string()),
+            }
+        };
+        match fetched {
+            Ok(t) => {
+                let n = app.playlist.set(&t);
+                tracing::info!("playlist loaded: {n} channels");
+            }
+            Err(e) => tracing::warn!("playlist load error: {e}"),
         }
         tokio::time::sleep(Duration::from_secs(app.cfg.playlist_refresh_secs)).await;
     }

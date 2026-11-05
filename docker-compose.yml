@@ -4,8 +4,11 @@ services:
     environment:
       # Ace Stream Engine HTTP API (already running elsewhere)
       ENGINE_URL: ${ENGINE_URL:-http://host.docker.internal:6878}
-      # m3u playlist with channels (groups via group-title)
+      # m3u playlist: http(s):// url (provider/LAN/docker-dns) or file:///data/playlist.m3u (mount it below)
       PLAYLIST_URL: ${PLAYLIST_URL:-}
+      # PLAYLIST_REFRESH_SECS: 1800
+      # volume for file:// playlists:
+      # - /path/on/host/playlist.m3u:/data/playlist.m3u:ro
       # optional overrides:
       # TRANSCODE_LIMIT: 4
       # STREAM_IDLE_SECS: 30
