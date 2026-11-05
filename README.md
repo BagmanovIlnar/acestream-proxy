@@ -47,9 +47,9 @@ ENGINE_URL=http://127.0.0.1:6878 ./target/release/acestream-proxy
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
-| `ACESTREAM_URI` | `127.0.0.1` | движок: ip или dns, схема/порт не обязательны (`192.168.1.37`, `acestream-engine`, `host.lan:6878`; старое имя `ENGINE_URL` тоже работает) |
-| `PORT` | `8080` | порт прокси |
-| `ACESTREAM_PLAYLIST_URL` | — | плейлист: `http(s)://...` или `file:///data/playlist.m3u` (старое имя `PLAYLIST_URL` тоже работает) |
+| `ACESTREAM_URI` | `127.0.0.1` | движок: ip или dns, схема/порт не обязательны. Когда задан явно, плейлист по умолчанию берётся с `http://<хост>:80/playlist.m3u` |
+| `ACESTREAM_PLAYLIST_URL` | — | override плейлиста: `http(s)://...` или `file:///data/playlist.m3u` |
+| `ACESTREAM_PLAYLIST_PORT` / `ACESTREAM_PLAYLIST_PATH` | `80` / `playlist.m3u` | порт и путь плейлиста на хосте движка |
 | `PLAYLIST_REFRESH_SECS` | `1800` | период обновления плейлиста |
 | `STREAM_IDLE_SECS` | `30` | сколько стрим живёт без зрителей |
 | `CLIENT_STALE_SECS` | `60` | HLS/браузер-клиент считается ушедшим |

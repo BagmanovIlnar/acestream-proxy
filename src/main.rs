@@ -63,6 +63,30 @@ fn normalize_engine_uri(raw: &str) -> String {
     s
 }
 
+/// Playlist source: explicit url, or derived from ACESTREAM_URI host
+/// (http://<engine host>:<ACESTREAM_PLAYLIST_PORT|80>/<ACESTREAM_PLAYLIST_PATH|playlist.m3u>).
+/// Derived only when ACESTREAM_URI is explicitly set.
+fn playlist_url_from_env() -> Option<String> {
+    if let Ok(u) = std::env::var("ACESTREAM_PLAYLIST_URL").or_else(|_| std::env::var("PLAYLIST_URL")) {
+        let u = u.trim().to_string();
+        if !u.is_empty() {
+            return Some(u);
+        }
+    }
+    let raw = std::env::var("ACESTREAM_URI")
+        .or_else(|_| std::env::var("ENGINE_URL"))
+        .ok()?;
+    let uri = normalize_engine_uri(&raw);
+    let (scheme, rest) = uri.split_once("://")?;
+    let host = rest.split(['/', '?']).next()?.split(':').next()?;
+    if host.is_empty() {
+        return None;
+    }
+    let port = envs("ACESTREAM_PLAYLIST_PORT", "80");
+    let path = envs("ACESTREAM_PLAYLIST_PATH", "playlist.m3u");
+    Some(format!("{scheme}://{host}:{port}/{path}"))
+}
+
 impl Config {
     fn from_env() -> Self {
         Config {
@@ -71,10 +95,7 @@ impl Config {
                 &envs("ENGINE_URL", "http://127.0.0.1:6878"),
             )),
             port: envs("PORT", "8080").parse().unwrap_or(8080),
-            playlist_url: std::env::var("ACESTREAM_PLAYLIST_URL")
-                .or_else(|_| std::env::var("PLAYLIST_URL"))
-                .ok()
-                .filter(|v| !v.trim().is_empty()),
+            playlist_url: playlist_url_from_env(),
             playlist_refresh_secs: envs("PLAYLIST_REFRESH_SECS", "1800").parse().unwrap_or(1800),
             idle_secs: envs("STREAM_IDLE_SECS", "30").parse().unwrap_or(30),
             stale_secs: envs("CLIENT_STALE_SECS", "60").parse().unwrap_or(60),
