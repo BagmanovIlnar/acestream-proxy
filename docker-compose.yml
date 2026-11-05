@@ -4,6 +4,8 @@ services:
     environment:
       # Ace Stream Engine: ip or dns, scheme/port optional (examples: 192.168.1.37, acestream-engine, acestream.lan:6878)
       ACESTREAM_URI: ${ACESTREAM_URI:-host.docker.internal}
+      # сколько живёт плейлист до обновления (6ч), override в .env/home_server:
+      ACESTREAM_PLAYLIST_TTL_SECS: ${ACESTREAM_PLAYLIST_TTL_SECS:-21600}
       # playlist auto: http://<engine host>:80/playlist.m3u; overrides if needed:
       # ACESTREAM_PLAYLIST_URL: http://provider/playlist.m3u   # or file:///data/playlist.m3u
       # ACESTREAM_PLAYLIST_PORT: 80
