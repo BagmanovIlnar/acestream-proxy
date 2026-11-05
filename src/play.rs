@@ -1,7 +1,7 @@
 use crate::state::{App, ClientKind, TsGuard};
 use crate::transcode;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use bytes::Bytes;
@@ -238,7 +238,12 @@ pub async fn browser_seg(
 }
 
 /// GET /playlist.m3u — all channels, urls point back to this proxy.
-pub async fn playlist_m3u(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+/// ?mode=transcode — urls point to /play/... (H.264+AAC HLS via ffmpeg, for weak devices).
+pub async fn playlist_m3u(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
     let host = app
         .cfg
         .public_url
@@ -256,6 +261,7 @@ pub async fn playlist_m3u(State(app): State<Arc<App>>, headers: HeaderMap) -> Re
         format!("http://{host}")
     };
     let esc = |s: &str| s.replace('"', "'");
+    let transcode = q.get("mode").map(|m| m.as_str() == "transcode").unwrap_or(false);
     let mut out = String::from("#EXTM3U\n");
     for ch in app.playlist.channels.read().unwrap().iter() {
         out.push_str(&format!(
@@ -265,7 +271,11 @@ pub async fn playlist_m3u(State(app): State<Arc<App>>, headers: HeaderMap) -> Re
             esc(&ch.group),
             esc(&ch.name)
         ));
-        out.push_str(&format!("{base}/stream/{}\n", ch.id));
+        if transcode {
+            out.push_str(&format!("{base}/play/{}/master.m3u8\n", ch.id));
+        } else {
+            out.push_str(&format!("{base}/stream/{}\n", ch.id));
+        }
     }
     (
         StatusCode::OK,

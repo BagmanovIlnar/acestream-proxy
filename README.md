@@ -22,7 +22,7 @@
 - **Браузерное воспроизведение**: `GET /play/{id}/master.m3u8`
   - кодеки браузерные (h264+aac/mp3) → редирект на HLS движка (0 CPU)
   - иначе → транскод ffmpeg (h264+aac), все аудиодорожки — как alternate AUDIO renditions в master-плейлисте (hls.js переключает через `hls.audioTrack`)
-- **Плейлист со всеми каналами**: `GET /playlist.m3u` — url ведут на прокси, категории через `group-title`
+- **Плейлист со всеми каналами**: `GET /playlist.m3u` — url ведут на прокси, категории через `group-title`; `?mode=transcode` — ссылки сразу на транскод (H.264+AAC HLS для слабых устройств)
 - **API + Swagger**: `http://localhost:8080/swagger-ui`
 - Автоочистка: стрим без зрителей гаснет через `STREAM_IDLE_SECS`; HLS/браузерные клиенты без запросов дропаются через `CLIENT_STALE_SECS`
 
