@@ -1,0 +1,18 @@
+services:
+  proxy:
+    build: .
+    environment:
+      # Ace Stream Engine HTTP API (already running elsewhere)
+      ENGINE_URL: ${ENGINE_URL:-http://host.docker.internal:6878}
+      # m3u playlist with channels (groups via group-title)
+      PLAYLIST_URL: ${PLAYLIST_URL:-}
+      # optional overrides:
+      # TRANSCODE_LIMIT: 4
+      # STREAM_IDLE_SECS: 30
+      # CLIENT_STALE_SECS: 60
+      # PUBLIC_URL: http://192.168.1.10:8080
+    ports:
+      - "8080:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # for linux hosts
+    restart: unless-stopped
