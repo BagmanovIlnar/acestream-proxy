@@ -42,12 +42,39 @@ fn envs(key: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
+/// ACESTREAM_URI: ip or dns, scheme/port optional (http:// + :6878 defaults).
+fn normalize_engine_uri(raw: &str) -> String {
+    let mut s = raw.trim().trim_end_matches('/').to_string();
+    if !s.starts_with("http://") && !s.starts_with("https://") {
+        s = format!("http://{s}");
+    }
+    let auth = s
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(&s);
+    let has_port = auth
+        .split(['/', '?'])
+        .next()
+        .map(|a| a.contains(':'))
+        .unwrap_or(false);
+    if !has_port {
+        s.push_str(":6878");
+    }
+    s
+}
+
 impl Config {
     fn from_env() -> Self {
         Config {
-            engine_url: envs("ENGINE_URL", "http://127.0.0.1:6878"),
+            engine_url: normalize_engine_uri(&envs(
+                "ACESTREAM_URI",
+                &envs("ENGINE_URL", "http://127.0.0.1:6878"),
+            )),
             port: envs("PORT", "8080").parse().unwrap_or(8080),
-            playlist_url: std::env::var("PLAYLIST_URL").ok().filter(|v| !v.trim().is_empty()),
+            playlist_url: std::env::var("ACESTREAM_PLAYLIST_URL")
+                .or_else(|_| std::env::var("PLAYLIST_URL"))
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
             playlist_refresh_secs: envs("PLAYLIST_REFRESH_SECS", "1800").parse().unwrap_or(1800),
             idle_secs: envs("STREAM_IDLE_SECS", "30").parse().unwrap_or(30),
             stale_secs: envs("CLIENT_STALE_SECS", "60").parse().unwrap_or(60),
