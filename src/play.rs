@@ -93,7 +93,12 @@ pub async fn ts(
 }
 
 async fn proxy_url(app: &App, url: &str, force_m3u8: bool) -> Response {
-    match app.http.get(url).send().await {
+    // движок под нагрузкой рвёт свежесозданные соединения — один повтор на месте
+    let resp = match app.http.get(url).send().await {
+        Err(_) => app.http.get(url).send().await,
+        ok => ok,
+    };
+    match resp {
         Ok(r) if r.status().is_success() => {
             let ct = if force_m3u8 || url.contains(".m3u8") {
                 "application/vnd.apple.mpegurl".to_string()
@@ -202,26 +207,22 @@ pub async fn browser_master(
         &ua(&headers),
         ClientKind::Browser,
     );
-    let url = app.self_stream_url(&s.id); // broadcast, не движок: 2-й коннект к сессии движок рвёт с 500
-    let probe = s.probe.get_or_init(|| transcode::probe(url)).await;
-    if probe.is_err() {
-        // не кэшируем неудачу навсегда: сносим стрим, следующий запрос пересоздаст его со свежей сессией движка
-        let _ = app.streams.write().unwrap().remove(&s.id);
-    }
-    let info = match probe {
-        Ok(i) => i.clone(),
-        Err(e) => {
-            return err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("probe failed: {e}"),
-            )
+    // Safari: нативный HLS дешевле транскода, но нужен probe. Probe здесь НЕ блокирует
+    // остальных — Chrome/Firefox сразу уходят в транскод ниже, не дожидаясь ffprobe.
+    if is_safari(&ua(&headers)) {
+        let url = app.self_stream_url(&s.id);
+        // get_or_try_init: неудача probe не кэшируется навсегда, стрим НЕ сносим —
+        // сорванный probe не повод убивать сессию у всех зрителей. Safari остаётся
+        // только в транскоде.
+        if let Ok(info) = s.probe.get_or_try_init(|| transcode::probe(url)).await {
+            if transcode::browser_ok(info) && s.hls_index_url().is_some() {
+                return Redirect::temporary(&format!("/stream/{}/index.m3u8", s.id)).into_response();
+            }
         }
-    };
-    if transcode::browser_ok(&info) && s.hls_index_url().is_some() && is_safari(&ua(&headers)) {
-        // Safari умеет нативный HLS — отдаём дёшево, без транскода.
-        // Chrome/Firefox врут в canPlayType и нативный HLS не играют: им транскод (MSE берёт только fMP4).
-        return Redirect::temporary(&format!("/stream/{}/index.m3u8", s.id)).into_response();
     }
+    // Chrome/Firefox (и Safari без passthrough): транскод без probe — ffmpeg стартует
+    // сразу, аудио решается `-map 0:a:0?`. Прежний обязательный probe давал 96с + 503
+    // на холодном p2p-старте и сносил стрим при таймауте.
     let t = match app
         .transcodes
         .ensure(&s, &app.self_stream_url(&s.id), &app.cfg.tmp_dir)
@@ -248,8 +249,19 @@ pub async fn browser_master(
     // ждём пока ffmpeg напишет master-плейлист; холодный старт p2p (движок буферизует
     // источник, ffmpeg ждёт SPS/PPS+IDR) занимает до ~2 минут — иначе 504 на старте
     let master = t.dir.join("master.m3u8");
-    for _ in 0..300 {
+    for i in 0..300 {
         if master.exists() {
+            break;
+        }
+        // ждём дольше stale_secs — периодически подтверждаем жизнь, иначе janitor
+        // сочтёт зрителя протухшим и убьёт транскод на прогреве (мастер никогда не появится)
+        if i % 20 == 0 {
+            s.touch(&client_ip(&headers, &addr), &ua(&headers), ClientKind::Browser);
+        }
+        // ffmpeg умер во время прогрева (вход оборвался) — отдаём ошибку сразу,
+        // перезапуск сделает следующий запрос клиента (у hls.js ретрай через 10с)
+        if t.finished().await {
+            tracing::warn!(stream = %s.id, "transcode died during warmup");
             break;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;

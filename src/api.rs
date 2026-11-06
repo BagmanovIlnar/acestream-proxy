@@ -173,8 +173,8 @@ fn stream_info(s: &Stream) -> StreamInfo {
         })
         .collect();
     let (video, audio) = match s.probe.get() {
-        Some(Ok(ci)) => (ci.video.clone(), ci.audio.clone()),
-        _ => (None, Vec::new()),
+        Some(ci) => (ci.video.clone(), ci.audio.clone()),
+        None => (None, Vec::new()),
     };
     StreamInfo {
         id: s.id.clone(),
@@ -279,11 +279,9 @@ pub async fn stream_audio(
         .await
         .map_err(|m| e(StatusCode::NOT_FOUND, m))?;
     let url = app.self_stream_url(&s.id); // broadcast, не движок: 2-й коннект к сессии движок рвёт с 500
-    let probe = s.probe.get_or_init(|| transcode::probe(url)).await;
-    if probe.is_err() {
-        // не кэшируем неудачу навсегда: сносим стрим, следующий запрос пересоздаст его со свежей сессией движка
-        let _ = app.streams.write().unwrap().remove(&s.id);
-    }
+    // get_or_try_init: неудача не кэшируется навсегда и НЕ сносит стрим (раньше снос
+    // гарантировал вечный цикл «96с probe → 503 → пересоздать → снова 96с»)
+    let probe = s.probe.get_or_try_init(|| transcode::probe(url)).await;
     match probe {
         Ok(info) => Ok(Json(AudioInfo {
             passthrough: transcode::browser_ok(info),

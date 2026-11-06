@@ -92,12 +92,12 @@ async fn probe_once(ts_url: &str) -> Result<CodecInfo, String> {
     Ok(CodecInfo { video, audio })
 }
 
-fn ffmpeg_args(ts_url: &str, dir: &Path, info: &CodecInfo) -> Vec<String> {
-    let has_audio = !info.audio.is_empty();
-    // ponytail: одна варианта (video + первая аудиодорожка). ffmpeg 5/9 с var_stream_map
-    // не резолвит %v для аудио-вариантов: плейлисты называются буквально "s???.m3u8",
-    // обе дорожки пишутся в один файл — hls.js не может их загрузить. Мультитрек вернуть,
-    // только если разобраться с генерацией master вручную.
+// ponytail: без probe — `-map 0:a:0?` сам разберётся, есть ли аудио; одна варианта
+// (video + первая аудиодорожка). ffmpeg 5/9 с var_stream_map не резолвит %v для
+// аудио-вариантов: плейлисты называются буквально "s???.m3u8", обе дорожки пишутся
+// в один файл — hls.js не может их загрузить. Мультитрек вернуть, только если
+// разобраться с генерацией master вручную.
+fn ffmpeg_args(ts_url: &str, dir: &Path) -> Vec<String> {
     let mut a: Vec<String> = vec![
         "-hide_banner".into(),
         "-loglevel".into(),
@@ -106,11 +106,8 @@ fn ffmpeg_args(ts_url: &str, dir: &Path, info: &CodecInfo) -> Vec<String> {
         ts_url.to_string(),
         "-map".into(),
         "0:v:0".into(),
-    ];
-    if has_audio {
-        a.extend(["-map".into(), "0:a:0".into()]);
-    }
-    a.extend([
+        "-map".into(),
+        "0:a:0?".into(), // ? = аудио опционально: нет дорожки — не ошибка
         "-c:v".into(),
         "libx264".into(),
         "-preset".into(),
@@ -119,17 +116,13 @@ fn ffmpeg_args(ts_url: &str, dir: &Path, info: &CodecInfo) -> Vec<String> {
         "48".into(),
         "-sc_threshold".into(),
         "0".into(),
-    ]);
-    if has_audio {
-        a.extend([
-            "-c:a".into(),
-            "aac".into(),
-            "-ac".into(),
-            "2".into(),
-            "-b:a".into(),
-            "128k".into(),
-        ]);
-    }
+        "-c:a".into(),
+        "aac".into(),
+        "-ac".into(),
+        "2".into(),
+        "-b:a".into(),
+        "128k".into(),
+    ];
     a.extend([
         "-f".into(),
         "hls".into(),
@@ -201,12 +194,6 @@ impl Transcodes {
         if let Some(t) = self.get(&stream.id) {
             return Ok(t);
         }
-        let info = stream
-            .probe
-            .get()
-            .cloned()
-            .ok_or_else(|| "codec info not probed yet".to_string())?
-            .map_err(|e| format!("probe failed: {e}"))?;
         let permit = Arc::clone(&self.sem).try_acquire_owned().map_err(|_| {
             "transcode limit reached, close other transcodes or raise TRANSCODE_LIMIT".to_string()
         })?;
@@ -214,7 +201,7 @@ impl Transcodes {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
         let mut child = tokio::process::Command::new("ffmpeg")
-            .args(ffmpeg_args(ts_url, &dir, &info))
+            .args(ffmpeg_args(ts_url, &dir))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
@@ -265,25 +252,14 @@ impl Transcodes {
 mod tests {
     use super::*;
 
-    fn info(audio: usize) -> CodecInfo {
-        CodecInfo {
-            video: Some("hevc".into()),
-            audio: (0..audio)
-                .map(|i| AudioTrack { index: i, codec: "ac3".into(), lang: None })
-                .collect(),
-        }
-    }
-
+    #[test]
     #[test]
     fn single_variant_no_var_stream_map() {
-        let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), &info(2));
-        // ровно одна аудио-дорожка, без var_stream_map/master_pl_name (ffmpeg их ломает)
-        assert_eq!(args.iter().filter(|a| a.as_str() == "0:a:0").count(), 1);
+        let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"));
+        // ровно одна аудио-дорожка (опциональная), без var_stream_map/master_pl_name
+        assert_eq!(args.iter().filter(|a| a.as_str() == "0:a:0?").count(), 1);
         assert!(!args.iter().any(|a| a.contains("0:a:1")));
         assert!(!args.iter().any(|a| a.contains("var_stream_map") || a.contains("master_pl_name")));
         assert_eq!(args.last().unwrap(), "/tmp/t/master.m3u8");
-        // без аудио: только видео
-        let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), &info(0));
-        assert!(!args.iter().any(|a| a.starts_with("0:a")));
     }
 }

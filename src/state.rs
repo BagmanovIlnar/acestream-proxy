@@ -48,7 +48,7 @@ pub struct Stream {
     pub ts_tx: broadcast::Sender<Bytes>,
     pub clients: Mutex<HashMap<u64, Client>>,
     pub pump: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-    pub probe: OnceCell<Result<CodecInfo, String>>,
+    pub probe: OnceCell<CodecInfo>, // только успех; неудача не кэшируется (get_or_try_init)
     pub empty_since: Mutex<Option<Instant>>,
 }
 
@@ -151,6 +151,10 @@ impl App {
         let engine = Engine::new(&cfg.engine_url);
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
+            // движок зависает на запросах без UA и рвёт keep-alive: без пула и с UA,
+            // как Engine::new — этот клиент тоже ходит в движок (HLS passthrough)
+            .user_agent(concat!("acestream-proxy/", env!("CARGO_PKG_VERSION")))
+            .pool_max_idle_per_host(0)
             .build()
             .expect("reqwest client");
         let transcodes = Transcodes::new(cfg.transcode_limit);
