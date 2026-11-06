@@ -5,7 +5,7 @@ use crate::util::{content_id, fnv64};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, OnceCell};
@@ -53,6 +53,9 @@ pub struct Stream {
     /// Плеер просил полный транскод (?enc=1 после битого remux) — помним,
     /// иначе чужой запрос без параметра откатит стрим в copy и вернёт глитчи
     pub force_encode: AtomicBool,
+    /// Сдвиг звука в мс (<0 — раньше, >0 — позже); выставляется ?ad= из плеера.
+    /// Хранится на стриме: запросы без параметра не сбросят подстройку
+    pub audio_delay: AtomicI32,
     pub empty_since: Mutex<Option<Instant>>,
 }
 
@@ -336,6 +339,7 @@ impl App {
             pump: tokio::sync::Mutex::new(None),
             probe: OnceCell::new(),
             force_encode: AtomicBool::new(false),
+            audio_delay: AtomicI32::new(0),
             empty_since: Mutex::new(None),
         });
         // ponytail: on a race the loser's engine session is orphaned; engine's own
