@@ -177,9 +177,13 @@ fn ffmpeg_args(ts_url: &str, dir: &Path, mode: EncodeMode) -> Vec<String> {
         // aac уже браузерный; ADTS→ASC без перекодирования, иначе ffmpeg откажется муксить
         a.extend(["-c:a".into(), "copy".into(), "-bsf:a".into(), "aac_adtstoasc".into()]);
     } else {
+        // IPTV-источники плывут по аудио-PTS — ресемплер держит звук прилипленным
+        // к таймлайну (иначе звук уползает от видео; VLC это молча маскирует)
         a.extend([
             "-c:a".into(),
             "aac".into(),
+            "-af".into(),
+            "aresample=async=1".into(),
             "-ac".into(),
             "2".into(),
             "-b:a".into(),
@@ -377,5 +381,15 @@ mod tests {
         assert!(args.windows(2).any(|w| w[0] == "-bsf:a" && w[1] == "aac_adtstoasc"));
         // кодировщикам нечего там делать
         assert!(!args.iter().any(|a| a == "libx264" || a == "aac" || a == "scale=-2:720" || a == "veryfast"));
+    }
+
+    #[test]
+    fn encode_audio_uses_async_resampler() {
+        // дрейф аудио-PTS у IPTV: звук кодируется через aresample=async=1,
+        // в copy-режиме аудио-фильтров нет
+        let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), EncodeMode { video_copy: true, audio_copy: false });
+        assert!(args.windows(2).any(|w| w[0] == "-af" && w[1] == "aresample=async=1"));
+        let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), EncodeMode { video_copy: true, audio_copy: true });
+        assert!(!args.iter().any(|a| a.contains("aresample")));
     }
 }
