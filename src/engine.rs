@@ -205,7 +205,8 @@ impl Engine {
         }
         self.http
             .get(&search_url)
-            .timeout(Duration::from_secs(30))
+            // движок собирает страницу поиска живым запросом в p2p-каталог — медленно
+            .timeout(Duration::from_secs(60))
             .send()
             .await
             .map_err(|e| format!("search request failed: {}", chain(&e)))?

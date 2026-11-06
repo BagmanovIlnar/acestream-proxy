@@ -9,6 +9,11 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, OnceCell};
 
+/// Страница каталога /search. 200 движок 3.2.11 не успевает собрать за таймаут
+/// (однопоточный python, поиск живой) — каждая страница падала, каталог пустой.
+/// 50 — меньше работы на запрос; «короткая страница» = движок обрезал.
+const PAGE_SIZE: u32 = 50;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ClientKind {
     Ts,
@@ -184,7 +189,7 @@ impl App {
         let app = self.clone();
         self.reseed.store(false, Ordering::Relaxed);
         tokio::spawn(async move {
-            // полный каталог через /search пагинацией (200 позиций/страница).
+            // полный каталог через /search пагинацией (PAGE_SIZE позиций/страница).
             // Страницы нестабильны (движок случайно роняет/обрезает их), поэтому
             // один прогон даёт случайный недобор — собираем его в merge()
             // (дедуипликация), повторяем витки каждые 30 минут; ensure_fresh(TTL)
@@ -219,7 +224,7 @@ impl App {
                             if attempt > 0 {
                                 tokio::time::sleep(Duration::from_secs(5)).await;
                             }
-                            match app.engine.search_page(&token, None, None, page, 200).await {
+                            match app.engine.search_page(&token, None, None, page, PAGE_SIZE).await {
                                 Ok(raw) => {
                                     got = Some(raw);
                                     break;
@@ -234,7 +239,7 @@ impl App {
                                     .merge(crate::playlist::channels_from_search(&raw));
                                 if n == 0 {
                                     retry.retain(|p| *p <= page); // страница пуста — каталог кончился
-                                } else if n < 200 {
+                                } else if n < PAGE_SIZE as usize {
                                     retry.push(page); // движок мог обрезать страницу — переспросим (merge дедуиплицирует)
                                 }
                             }
@@ -501,7 +506,7 @@ mod tests {
         std::env::set_var("ACESTREAM_SEED_PAUSE_SECS", "1");
 
         let fetches = Arc::new(AtomicUsize::new(0));
-        // p0 = 200 позиций, p1 = 50 (короткая), p2+ = пусто (конец каталога):
+        // p0 = полная страница (PAGE_SIZE), p1 = короткая, p2+ = пусто (конец каталога):
         // виток = 8 запросов (p1 переспрашивается до лимита раундов)
         let f = fetches.clone();
         let mock = axum::Router::new()
@@ -519,8 +524,8 @@ mod tests {
                         let page_no: u32 = q.get("page").and_then(|p| p.parse().ok()).unwrap_or(0);
                         async move {
                             axum::Json(match page_no {
-                                0 => page(200, 0),
-                                1 => page(50, 1000),
+                                0 => page(PAGE_SIZE as usize, 0),
+                                1 => page(10, 1000),
                                 _ => serde_json::json!({"result": {"results": []}}),
                             })
                         }
@@ -544,10 +549,10 @@ mod tests {
         };
         let app = Arc::new(App::new(cfg));
 
-        // 1) старт: свипер собирает каталог (200 + 50) и уходит в паузу
+        // 1) старт: свипер собирает каталог (PAGE_SIZE + 10) и уходит в паузу
         app.kick_seed(false);
         assert!(
-            wait_for(|| app.playlist.snapshot().len() == 250, 10).await,
+            wait_for(|| app.playlist.snapshot().len() == (PAGE_SIZE as usize + 10), 10).await,
             "sweep must collect the full catalog"
         );
         let after_sweep1 = fetches.load(AtomicOrd::Relaxed);
@@ -565,7 +570,11 @@ mod tests {
         app.kick_seed(true);
         app.kick_seed(true);
         assert!(
-            wait_for(|| app.playlist.snapshot().len() == 250, 10).await,
+            wait_for(
+                || app.playlist.snapshot().len() == (PAGE_SIZE as usize + 10),
+                10
+            )
+            .await,
             "double rebuild must still recollect the catalog"
         );
     }
