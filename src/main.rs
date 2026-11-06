@@ -91,7 +91,7 @@ impl Config {
     paths(
         api::health, api::start_stream, api::list_streams, api::get_stream,
         api::delete_stream, api::stream_audio, api::list_clients,
-        api::list_channels, api::list_categories, api::search, play::playlist_m3u,
+        api::list_channels, api::list_categories, api::search, api::rebuild_channels, play::playlist_m3u,
     ),
     components(schemas(
         api::HealthInfo, api::StartStreamReq, api::StreamInfo, api::ClientInfo,

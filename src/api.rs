@@ -383,8 +383,18 @@ pub async fn search(
     Ok(Json(SearchResult { items, raw }))
 }
 
+#[utoipa::path(
+    post, path = "/api/channels/rebuild",
+    responses((status = 202, description = "Каталог очищен, сбор каналов запущен в фоне"))
+)]
+pub async fn rebuild_channels(State(app): State<Arc<App>>) -> StatusCode {
+    app.playlist.reset();
+    app.kick_seed();
+    StatusCode::ACCEPTED
+}
+
 pub fn router() -> axum::Router<Arc<App>> {
-    use axum::routing::get;
+    use axum::routing::{get, post};
     axum::Router::new()
         .route("/health", get(health))
         .route("/streams", get(list_streams).post(start_stream))
@@ -393,5 +403,6 @@ pub fn router() -> axum::Router<Arc<App>> {
         .route("/clients", get(list_clients))
         .route("/channels", get(list_channels))
         .route("/channels/categories", get(list_categories))
+        .route("/channels/rebuild", post(rebuild_channels))
         .route("/search", get(search))
 }

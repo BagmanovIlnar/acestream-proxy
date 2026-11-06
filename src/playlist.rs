@@ -347,6 +347,13 @@ impl PlaylistHistory {
         !matches!(file_age_secs(&self.path), Some(age) if age < ttl_secs)
     }
 
+    /// Wipe the catalog; rebuild via App::kick_seed (engine search).
+    pub fn reset(&self) {
+        self.channels.write().unwrap().clear();
+        let _ = std::fs::write(&self.path, to_m3u(&[]));
+        tracing::info!("playlist: reset");
+    }
+
     /// Upsert externally discovered channels (engine search). Existing entries
     /// keep their names; everything gets last_seen=now so it survives the TTL prune.
     pub fn merge(&self, incoming: Vec<Channel>) {
