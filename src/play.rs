@@ -245,10 +245,10 @@ pub async fn browser_master(
     } else {
         t
     };
-    // ждём пока ffmpeg напишет master-плейлист; движок отдаёт первые кадры с задержкой,
-    // поэтому окно щедрое — иначе 504 на холодном старте
+    // ждём пока ffmpeg напишет master-плейлист; холодный старт p2p (движок буферизует
+    // источник, ffmpeg ждёт SPS/PPS+IDR) занимает до ~2 минут — иначе 504 на старте
     let master = t.dir.join("master.m3u8");
-    for _ in 0..120 {
+    for _ in 0..300 {
         if master.exists() {
             break;
         }

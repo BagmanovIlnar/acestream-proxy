@@ -1,7 +1,8 @@
-FROM rust:1 AS build
+FROM rust:1-bookworm AS build
+# bookworm = runtime base: rust:1 (trixie, glibc>=2.39) binaries crash on bookworm-slim (glibc 2.36)
 WORKDIR /app
 COPY . .
-RUN cargo build --release
+RUN cargo build --release --locked
 
 FROM debian:bookworm-slim
 RUN apt-get update \
