@@ -12,7 +12,8 @@ pub struct Channel {
     pub name: String,
     /// Content id / url / magnet (what gets sent to the engine)
     pub url: String,
-    /// Display group (first engine category or "Мои" for user-started)
+    /// Display group for m3u group-title (first engine category or "Мои"), hidden in JSON API
+    #[serde(skip_serializing)]
     pub group: String,
     /// All engine categories (filter via /api/channels?category=)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

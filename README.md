@@ -63,7 +63,7 @@ ENGINE_URL=http://127.0.0.1:6878 ./target/release/acestream-proxy
 | GET/DELETE | `/api/streams/{id}` | инфо / убить стрим |
 | GET | `/api/streams/{id}/audio` | аудиодорожки + нужен ли транскод |
 | GET | `/api/clients` | все клиенты и что смотрят |
-| GET | `/api/channels?category=&group=&country=` | каналы (category — категория движка: tv, sport, movies, …; group/country — фильтр по подстроке) |
+| GET | `/api/channels?category=&country=` | каналы (category — категория движка: tv, sport, movies, …; country — фильтр по подстроке) |
 | GET | `/api/channels/categories` | категории движка с количеством каналов |
 | GET | `/playlist.m3u` | плейлист для VLC/TV |
 

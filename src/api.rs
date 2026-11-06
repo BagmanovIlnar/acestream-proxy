@@ -89,12 +89,10 @@ pub struct HealthInfo {
 
 #[derive(Deserialize, IntoParams)]
 pub struct ChannelsQuery {
-    /// Case-insensitive substring filter by group-title
-    pub group: Option<String>,
-    /// Case-insensitive substring filter by tvg-country
-    pub country: Option<String>,
     /// Engine category filter (e.g. tv, sport, movies, documentary, news, music)
     pub category: Option<String>,
+    /// Case-insensitive substring filter by tvg-country
+    pub country: Option<String>,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -320,10 +318,14 @@ pub async fn list_channels(
         chans
             .into_iter()
             .filter(|c| {
-                let g = q
-                    .group
+                let cat = q
+                    .category
                     .as_deref()
-                    .map(|g| c.group.to_lowercase().contains(&g.to_lowercase()))
+                    .map(|cat| {
+                        c.categories
+                            .iter()
+                            .any(|x| x.eq_ignore_ascii_case(cat.trim()))
+                    })
                     .unwrap_or(true);
                 let cc = q
                     .country
@@ -335,16 +337,7 @@ pub async fn list_channels(
                             .unwrap_or(false)
                     })
                     .unwrap_or(true);
-                let cat = q
-                    .category
-                    .as_deref()
-                    .map(|cat| {
-                        c.categories
-                            .iter()
-                            .any(|x| x.eq_ignore_ascii_case(cat.trim()))
-                    })
-                    .unwrap_or(true);
-                g && cc && cat
+                cat && cc
             })
             .collect(),
     )

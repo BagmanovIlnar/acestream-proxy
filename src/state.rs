@@ -170,7 +170,11 @@ impl App {
     /// full catalog needs an external m3u source.
     pub fn kick_seed(self: &Arc<Self>) {
         use std::sync::atomic::Ordering;
-        if !self.playlist.cache_stale(self.cfg.playlist_ttl_secs) {
+        // seed when cache is stale OR empty (a fresh-but-empty cache left by an
+        // old run must not block seeding for a whole TTL)
+        if !self.playlist.cache_stale(self.cfg.playlist_ttl_secs)
+            && !self.playlist.snapshot().is_empty()
+        {
             return;
         }
         if self.seeding.swap(true, Ordering::Relaxed) {
