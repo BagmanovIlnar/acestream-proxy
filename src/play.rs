@@ -239,6 +239,11 @@ pub async fn browser_seg(
 
 /// GET /playlist.m3u — all channels, urls point back to this proxy.
 /// ?mode=transcode — urls point to /play/... (H.264+AAC HLS via ffmpeg, for weak devices).
+#[utoipa::path(
+    get, path = "/playlist.m3u",
+    params(("mode" = Option<String>, Query, description = "transcode — ссылки на HLS /play/... (для слабых плееров)")),
+    responses((status = 200, description = "M3U плейлист всех каналов (ссылки ведут на этот прокси)", content_type = "audio/x-mpegurl"))
+)]
 pub async fn playlist_m3u(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
