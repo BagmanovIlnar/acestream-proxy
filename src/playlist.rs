@@ -12,7 +12,11 @@ pub struct Channel {
     pub name: String,
     /// Content id / url / magnet (what gets sent to the engine)
     pub url: String,
+    /// Display group (first engine category or "Мои" for user-started)
     pub group: String,
+    /// All engine categories (filter via /api/channels?category=)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<String>,
     pub logo: Option<String>,
     #[serde(rename = "tvgId", alias = "tvg-id")]
     pub tvg_id: Option<String>,
@@ -135,6 +139,9 @@ pub fn parse_m3u(text: &str) -> Vec<Channel> {
             name,
             url,
             group: non_empty(&attrs, "group-title").unwrap_or_else(|| "Мои".into()),
+            categories: non_empty(&attrs, "x-cats")
+                .map(|s| s.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect())
+                .unwrap_or_default(),
             logo: non_empty(&attrs, "tvg-logo"),
             tvg_id: non_empty(&attrs, "tvg-id"),
             country: non_empty(&attrs, "tvg-country"),
@@ -151,8 +158,13 @@ fn to_m3u(chs: &[Channel]) -> String {
     let mut out = String::from("#EXTM3U\n");
     for c in chs {
         out.push_str(&format!(
-            "#EXTINF:-1 x-last=\"{}\" group-title=\"{}\",{}\n{}\n",
+            "#EXTINF:-1 x-last=\"{}\"{} group-title=\"{}\",{}\n{}\n",
             c.last_seen,
+            if c.categories.is_empty() {
+                String::new()
+            } else {
+                format!(" x-cats=\"{}\"", esc(&c.categories.join(",")))
+            },
             esc(&c.group),
             esc(&c.name),
             c.url
@@ -168,6 +180,66 @@ fn to_m3u(chs: &[Channel]) -> String {
 pub struct PlaylistHistory {
     pub channels: RwLock<Vec<Channel>>,
     path: PathBuf,
+}
+
+/// Engine /server/api search response -> playable channels (url = 40-hex infohash).
+pub fn channels_from_search(v: &serde_json::Value) -> Vec<Channel> {
+    let mut out = Vec::new();
+    if let Some(cats) = v
+        .pointer("/result/results")
+        .or_else(|| v.get("results"))
+        .and_then(|x| x.as_array())
+    {
+        for it in cats.iter().filter_map(|c| c.get("items")) {
+            for it in it.as_array().into_iter().flatten() {
+                let ih = match it.get("infohash").and_then(|x| x.as_str()) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if it.get("disabled").and_then(|x| x.as_bool()).unwrap_or(false) {
+                    continue;
+                }
+                out.push(Channel {
+                    id: content_id(ih),
+                    name: it
+                        .get("name")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or(ih)
+                        .to_string(),
+                    url: ih.to_string(),
+                    group: it
+                        .get("categories")
+                        .and_then(|x| x.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|c| c.as_str())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("Трансляции")
+                        .to_string(),
+                    categories: it
+                        .get("categories")
+                        .and_then(|x| x.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|c| c.as_str())
+                                .filter(|s| !s.is_empty())
+                                .map(String::from)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    logo: None,
+                    tvg_id: None,
+                    country: it
+                        .get("countries")
+                        .and_then(|x| x.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|c| c.as_str())
+                        .map(|s| s.to_uppercase()),
+                    last_seen: 0,
+                });
+            }
+        }
+    }
+    out
 }
 
 fn file_age_secs(p: &std::path::Path) -> Option<u64> {
@@ -223,6 +295,7 @@ impl PlaylistHistory {
                 name: name.map(str::trim).filter(|n| !n.is_empty()).map(String::from).unwrap_or_else(|| default_name(content)),
                 url: content.to_string(),
                 group: "Мои".into(),
+                categories: Vec::new(),
                 logo: None,
                 tvg_id: None,
                 country: None,
@@ -239,7 +312,7 @@ impl PlaylistHistory {
     /// Cache lifetime: when the cached playlist is older than ttl it is dropped
     /// and rebuilt on this request, keeping only channels touched within the TTL.
     pub fn ensure_fresh(&self, ttl_secs: u64) {
-        if matches!(file_age_secs(&self.path), Some(age) if age < ttl_secs) {
+        if !self.cache_stale(ttl_secs) {
             return;
         }
         let now = now_secs();
@@ -250,6 +323,30 @@ impl PlaylistHistory {
         let _ = std::fs::create_dir_all(self.path.parent().unwrap_or(std::path::Path::new(".")));
         let _ = std::fs::write(&self.path, text); // recreated after TTL
         tracing::info!("playlist: cache expired, regenerated");
+    }
+
+    /// True when the m3u cache file is missing or older than ttl.
+    pub fn cache_stale(&self, ttl_secs: u64) -> bool {
+        !matches!(file_age_secs(&self.path), Some(age) if age < ttl_secs)
+    }
+
+    /// Upsert externally discovered channels (engine search). Existing entries
+    /// keep their names; everything gets last_seen=now so it survives the TTL prune.
+    pub fn merge(&self, incoming: Vec<Channel>) {
+        if incoming.is_empty() {
+            return;
+        }
+        let now = now_secs();
+        let mut chs = self.channels.write().unwrap();
+        for c in incoming {
+            match chs.iter_mut().find(|e| e.id == c.id) {
+                Some(e) => e.last_seen = now,
+                None => chs.push(Channel { last_seen: now, ..c }),
+            }
+        }
+        let text = to_m3u(&chs);
+        drop(chs);
+        let _ = std::fs::write(&self.path, text);
     }
 }
 
@@ -273,6 +370,32 @@ mod tests {
         assert_eq!(chans[1].url, "http://ex.ru/torrent.acelive");
         assert_eq!(chans[1].group, "Фильмы");
         assert_ne!(chans[0].id, chans[1].id);
+    }
+
+    #[test]
+    fn parses_engine_search_results() {
+        let raw = serde_json::json!({"result": {"results": [{"name": "Discovery", "items": [
+            {"name": "Discovery HD", "infohash": "6477d56108d979adf1a069b26c820e749b94b9da",
+             "categories": ["documentaries"], "countries": ["ru"], "disabled": false},
+            {"name": "dead", "infohash": "0000000000000000000000000000000000000000", "disabled": true}
+        ]}]}});
+        let chs = channels_from_search(&raw);
+        assert_eq!(chs.len(), 1);
+        assert_eq!(chs[0].url, "6477d56108d979adf1a069b26c820e749b94b9da");
+        assert_eq!(chs[0].group, "documentaries");
+        assert_eq!(chs[0].country.as_deref(), Some("RU"));
+        assert_eq!(chs[0].categories, vec!["documentaries"]);
+    }
+
+    #[test]
+    fn m3u_roundtrip_keeps_categories() {
+        let c = channels_from_search(&serde_json::json!({"result": {"results": [
+            {"name": "X", "items": [{"name": "X", "infohash": "6477d56108d979adf1a069b26c820e749b94b9da",
+             "categories": ["sport", "tv"]}]}]}})).pop().unwrap();
+        let text = to_m3u(&[c]);
+        let back = parse_m3u(&text);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].categories, vec!["sport", "tv"]);
     }
 
     #[test]

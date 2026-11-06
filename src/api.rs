@@ -73,7 +73,7 @@ pub struct ClientRow {
 }
 
 #[derive(Serialize, ToSchema)]
-pub struct GroupInfo {
+pub struct CategoryInfo {
     pub name: String,
     pub count: u32,
 }
@@ -93,6 +93,8 @@ pub struct ChannelsQuery {
     pub group: Option<String>,
     /// Case-insensitive substring filter by tvg-country
     pub country: Option<String>,
+    /// Engine category filter (e.g. tv, sport, movies, documentary, news, music)
+    pub category: Option<String>,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -123,12 +125,17 @@ fn extract_search_items(v: &serde_json::Value) -> Vec<SearchItem> {
         .or_else(|| v.get("results").and_then(|x| x.as_array()))
         .cloned()
         .unwrap_or_default();
-    arr.iter()
-        .filter_map(|i| {
+    // engine returns [{name, items: [...]}, ...]; flatten (self item if no nesting)
+    let flat = arr
+        .iter()
+        .flat_map(|c| c.get("items").and_then(|x| x.as_array()).cloned().unwrap_or_default())
+        .chain(arr.iter().filter(|c| c.get("items").is_none()).cloned());
+    flat.filter_map(|i| {
             let cid = i
                 .get("content_id")
                 .and_then(|x| x.as_str())
-                .or_else(|| i.get("id").and_then(|x| x.as_str()))?;
+                .or_else(|| i.get("id").and_then(|x| x.as_str()))
+                .or_else(|| i.get("infohash").and_then(|x| x.as_str()))?;
             let name = i
                 .get("name")
                 .and_then(|x| x.as_str())
@@ -306,6 +313,7 @@ pub async fn list_channels(
     State(app): State<Arc<App>>,
     Query(q): Query<ChannelsQuery>,
 ) -> Json<Vec<crate::playlist::Channel>> {
+    app.kick_seed();
     app.playlist.ensure_fresh(app.cfg.playlist_ttl_secs);
     let chans = app.playlist.snapshot();
     Json(
@@ -327,21 +335,38 @@ pub async fn list_channels(
                             .unwrap_or(false)
                     })
                     .unwrap_or(true);
-                g && cc
+                let cat = q
+                    .category
+                    .as_deref()
+                    .map(|cat| {
+                        c.categories
+                            .iter()
+                            .any(|x| x.eq_ignore_ascii_case(cat.trim()))
+                    })
+                    .unwrap_or(true);
+                g && cc && cat
             })
             .collect(),
     )
 }
 
-#[utoipa::path(get, path = "/api/channels/groups", responses((status = 200, body = [GroupInfo])))]
-pub async fn list_groups(State(app): State<Arc<App>>) -> Json<Vec<GroupInfo>> {
+#[utoipa::path(get, path = "/api/channels/categories", responses((status = 200, body = [CategoryInfo], description = "Категории движка (docs.acestream.net: list-of-categories) с количеством каналов")))]
+pub async fn list_categories(State(app): State<Arc<App>>) -> Json<Vec<CategoryInfo>> {
+    app.kick_seed();
     app.playlist.ensure_fresh(app.cfg.playlist_ttl_secs);
     let chans = app.playlist.snapshot();
     let mut m: BTreeMap<String, u32> = BTreeMap::new();
     for c in chans.iter() {
-        *m.entry(c.group.clone()).or_insert(0) += 1;
+        let cats: Vec<&str> = if c.categories.is_empty() {
+            vec![c.group.as_str()]
+        } else {
+            c.categories.iter().map(String::as_str).collect()
+        };
+        for cat in cats {
+            *m.entry(cat.to_string()).or_insert(0) += 1;
+        }
     }
-    Json(m.into_iter().map(|(name, count)| GroupInfo { name, count }).collect())
+    Json(m.into_iter().map(|(name, count)| CategoryInfo { name, count }).collect())
 }
 
 #[utoipa::path(
@@ -374,6 +399,6 @@ pub fn router() -> axum::Router<Arc<App>> {
         .route("/streams/{id}/audio", get(stream_audio))
         .route("/clients", get(list_clients))
         .route("/channels", get(list_channels))
-        .route("/channels/groups", get(list_groups))
+        .route("/channels/categories", get(list_categories))
         .route("/search", get(search))
 }

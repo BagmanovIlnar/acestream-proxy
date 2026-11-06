@@ -40,9 +40,16 @@ pub fn content_query(content: &str) -> String {
 
 impl Engine {
     pub fn new(base: &str) -> Self {
+        // ponytail: pool disabled — the engine drops keep-alive conns and pooled
+        // reuse fails with "error sending request"; retry-on-stale not worth it
+        let http = reqwest::Client::builder()
+            .user_agent(concat!("acestream-proxy/", env!("CARGO_PKG_VERSION"))) // the engine hangs on UA-less requests
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap_or_default();
         Engine {
             base: base.trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
+            http,
         }
     }
 
@@ -123,6 +130,11 @@ impl Engine {
     /// Search public p2p broadcasts in the Ace Stream network via the engine's
     /// /server/api (get_api_access_token + method=search).
     pub async fn search(&self, q: Option<&str>) -> Result<serde_json::Value, String> {
+        let token = self.api_token().await?;
+        self.search_with(&token, q).await
+    }
+
+    pub async fn api_token(&self) -> Result<String, String> {
         let tok_url = format!("{}/server/api?method=get_api_access_token", self.base);
         let tok_resp: serde_json::Value = self
             .http
@@ -134,19 +146,28 @@ impl Engine {
             .json()
             .await
             .map_err(|e| format!("token response: {e}"))?;
-        let token = tok_resp
+        Ok(tok_resp
             .get("token")
             .and_then(|t| t.as_str())
             .or_else(|| tok_resp.pointer("/result/token").and_then(|t| t.as_str()))
             .ok_or_else(|| "engine returned no api token".to_string())?
-            .to_string();
+            .to_string())
+    }
+
+    /// One search call with an already fetched token (reuse it: the engine's
+    /// /server_api wedges for ~30s under request bursts).
+    pub async fn search_with(
+        &self,
+        token: &str,
+        q: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
         let mut search_url = format!(
             "{}/server/api?method=search&token={}",
             self.base,
-            urlencode(&token)
+            urlencode(token)
         );
         if let Some(q) = q.filter(|q| !q.trim().is_empty()) {
-            search_url.push_str(&format!("&q={}", urlencode(q.trim())));
+            search_url.push_str(&format!("&query={}", urlencode(q.trim())));
         }
         self.http
             .get(&search_url)

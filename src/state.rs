@@ -139,6 +139,8 @@ pub struct App {
     pub streams: RwLock<HashMap<String, Arc<Stream>>>,
     pub playlist: PlaylistHistory,
     pub transcodes: Transcodes,
+    /// guard: engine search seed in progress
+    seeding: std::sync::atomic::AtomicBool,
 }
 
 impl App {
@@ -157,7 +159,56 @@ impl App {
             streams: RwLock::new(HashMap::new()),
             playlist,
             transcodes,
+            seeding: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Seed the playlist with live public broadcasts from the engine (search).
+    /// Runs in the background (the engine wedges its /server/api for ~30s under
+    /// request bursts, so queries are spaced out); fires when the cache is stale.
+    /// ponytail: 5 fixed genre queries × 10 items — the engine has no pagination,
+    /// full catalog needs an external m3u source.
+    pub fn kick_seed(self: &Arc<Self>) {
+        use std::sync::atomic::Ordering;
+        if !self.playlist.cache_stale(self.cfg.playlist_ttl_secs) {
+            return;
+        }
+        if self.seeding.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let app = self.clone();
+        tokio::spawn(async move {
+            // up to 3 passes: the engine's /server/api randomly drops some queries,
+            // merge() dedupes so re-running a pass is idempotent
+            for _ in 0..3 {
+                let mut failed = false;
+                let token = match app.engine.api_token().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::warn!("seed: token failed: {e}");
+                        break;
+                    }
+                };
+                for q in ["", "sport", "news", "movies", "kids"] {
+                    match app.engine.search_with(&token, Some(q)).await {
+                        Ok(raw) => app
+                            .playlist
+                            .merge(crate::playlist::channels_from_search(&raw)),
+                        Err(e) => {
+                            failed = true;
+                            tracing::warn!("seed search '{q}' failed: {e}");
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+                if !failed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(20)).await;
+            }
+            app.seeding.store(false, Ordering::Relaxed);
+            tracing::info!("playlist: seeded, {} channels", app.playlist.snapshot().len());
+        });
     }
 
     /// Resolve user input into engine content:

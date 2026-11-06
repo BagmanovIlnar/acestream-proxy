@@ -91,11 +91,11 @@ impl Config {
     paths(
         api::health, api::start_stream, api::list_streams, api::get_stream,
         api::delete_stream, api::stream_audio, api::list_clients,
-        api::list_channels, api::list_groups, api::search,
+        api::list_channels, api::list_categories, api::search,
     ),
     components(schemas(
         api::HealthInfo, api::StartStreamReq, api::StreamInfo, api::ClientInfo,
-        api::AudioInfo, api::ClientRow, api::GroupInfo, playlist::Channel,
+        api::AudioInfo, api::ClientRow, api::CategoryInfo, playlist::Channel,
         transcode::AudioTrack, api::SearchItem, api::SearchResult,
     )),
     tags(
@@ -117,6 +117,7 @@ async fn main() {
     let cfg = Config::from_env();
     let port = cfg.port;
     let app = Arc::new(App::new(cfg));
+    app.kick_seed(); // background: fill /api/channels from engine search
 
     {
         let a = Arc::clone(&app);

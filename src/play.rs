@@ -244,6 +244,7 @@ pub async fn playlist_m3u(
     headers: HeaderMap,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
+    app.kick_seed();
     app.playlist.ensure_fresh(app.cfg.playlist_ttl_secs);
     let host = app
         .cfg

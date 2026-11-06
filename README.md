@@ -22,7 +22,7 @@
 - **Браузерное воспроизведение**: `GET /play/{id}/master.m3u8`
   - кодеки браузерные (h264+aac/mp3) → редирект на HLS движка (0 CPU)
   - иначе → транскод ffmpeg (h264+aac), все аудиодорожки — как alternate AUDIO renditions в master-плейлисте (hls.js переключает через `hls.audioTrack`)
-- **Плейлист генерируется сам**: каждый запущенный канал (через Web UI, `POST /api/streams` или `/stream/{id}`) запоминается и сохраняется в `TMP_DIR/playlist.m3u`. Плейлист-файл — кэш со временем жизни `ACESTREAM_PLAYLIST_TTL_SECS` (6ч): по истечении удаляется и при следующем обращении создаётся заново из каналов, которые запускали/смотрели за этот срок. Отдача: `/api/channels` и `/playlist.m3u` (с категориями)
+- **Плейлист генерируется сам**: внешний каталог (живые трансляции из поиска движка) подтягивается в фоне при старте, каждый запущенный канал (через Web UI, `POST /api/streams` или `/stream/{id}`) запоминается и сохраняется в `TMP_DIR/playlist.m3u`. Плейлист-файл — кэш со временем жизни `ACESTREAM_PLAYLIST_TTL_SECS` (6ч): по истечении удаляется и при следующем обращении создаётся заново из каналов, которые запускали/смотрели за этот срок. Отдача: `/api/channels` и `/playlist.m3u` (с категориями)
 - **API + Swagger**: `http://localhost:8080/swagger-ui`
 - Автоочистка: стрим без зрителей гаснет через `STREAM_IDLE_SECS`; HLS/браузерные клиенты без запросов дропаются через `CLIENT_STALE_SECS`
 
@@ -63,8 +63,8 @@ ENGINE_URL=http://127.0.0.1:6878 ./target/release/acestream-proxy
 | GET/DELETE | `/api/streams/{id}` | инфо / убить стрим |
 | GET | `/api/streams/{id}/audio` | аудиодорожки + нужен ли транскод |
 | GET | `/api/clients` | все клиенты и что смотрят |
-| GET | `/api/channels?group=&country=` | каналы (фильтр по подстроке) |
-| GET | `/api/channels/groups` | группы каналов с количеством |
+| GET | `/api/channels?category=&group=&country=` | каналы (category — категория движка: tv, sport, movies, …; group/country — фильтр по подстроке) |
+| GET | `/api/channels/categories` | категории движка с количеством каналов |
 | GET | `/playlist.m3u` | плейлист для VLC/TV |
 
 Полная схема: `/swagger-ui`, OpenAPI json: `/api/openapi.json`. CORS открыт — веб-интерфейс можно размещать отдельно.
