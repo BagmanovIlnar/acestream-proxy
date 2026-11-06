@@ -141,6 +141,8 @@ pub struct App {
     pub transcodes: Transcodes,
     /// guard: engine search seed in progress
     seeding: std::sync::atomic::AtomicBool,
+    /// rebuild запрошен пока сидер ещё работает — он повторит сбор по завершении
+    reseed: std::sync::atomic::AtomicBool,
 }
 
 impl App {
@@ -160,6 +162,7 @@ impl App {
             playlist,
             transcodes,
             seeding: std::sync::atomic::AtomicBool::new(false),
+            reseed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -182,57 +185,81 @@ impl App {
             return;
         }
         if self.seeding.swap(true, Ordering::Relaxed) {
+            // сидер уже бежит — попросим его перекрутить сбор, когда закончит (case: rebuild)
+            self.reseed.store(true, Ordering::Relaxed);
             return;
         }
         let app = self.clone();
+        self.reseed.store(false, Ordering::Relaxed);
         tokio::spawn(async move {
-            // full catalog via /search pagination (200/page); failed pages are
-            // retried for up to 4 rounds — the engine randomly drops requests,
-            // merge() dedupes so re-fetching is idempotent
-            let mut todo: Vec<u32> = (0..20).collect();
-            for _ in 0..4 {
-                if todo.is_empty() {
-                    break;
-                }
-                let token = match app.engine.api_token().await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        tracing::warn!("seed: token failed: {e}");
+            // полный каталог через /search пагинацией (200/страница). Движок случайно
+            // роняет/обрезает страницы, merge() дедуиплицирует — собираем пока все
+            // страницы не отдадутся (лимит раундов): пустая страница = конец каталога,
+            // недозаполненная = переспрашиваем (иначе счёт каналов «плавает»)
+            loop {
+                let mut todo: Vec<u32> = (0..20).collect();
+                for _ in 0..6 {
+                    if todo.is_empty() {
                         break;
                     }
-                };
-                let mut retry: Vec<u32> = Vec::new();
-                for &page in &todo {
-                    match app
-                        .engine
-                        .search_page(&token, None, None, page, 200)
-                        .await
-                    {
-                        Ok(raw) => {
-                            let last = crate::playlist::search_results_len(&raw) < 200;
-                            app.playlist
-                                .merge(crate::playlist::channels_from_search(&raw));
-                            if last {
-                                retry.retain(|p| *p <= page); // higher pages don't exist
+                    let token = match app.engine.api_token().await {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tracing::warn!("seed: token failed: {e}");
+                            break;
+                        }
+                    };
+                    let mut retry: Vec<u32> = Vec::new();
+                    for &page in &todo {
+                        // движок — однопоточный python-сервер, рвёт соединения при плотном темпе:
+                        // две попытки на месте и большая пауза между страницами
+                        let mut got: Option<serde_json::Value> = None;
+                        for attempt in 0..2 {
+                            if attempt > 0 {
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                            }
+                            match app.engine.search_page(&token, None, None, page, 200).await {
+                                Ok(raw) => {
+                                    got = Some(raw);
+                                    break;
+                                }
+                                Err(e) => tracing::warn!("seed page {page} failed: {e}"),
                             }
                         }
-                        Err(e) => {
-                            retry.push(page);
-                            tracing::warn!("seed page {page} failed: {e}");
+                        match got {
+                            Some(raw) => {
+                                let n = crate::playlist::search_results_len(&raw);
+                                app.playlist
+                                    .merge(crate::playlist::channels_from_search(&raw));
+                                if n == 0 {
+                                    retry.retain(|p| *p <= page); // страница пуста — каталог кончился
+                                } else if n < 200 {
+                                    retry.push(page); // движок мог обрезать страницу — переспросим (merge дедуиплицирует)
+                                }
+                            }
+                            None => retry.push(page),
                         }
+                        tokio::time::sleep(Duration::from_secs(10)).await;
                     }
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    todo = retry;
+                    if !todo.is_empty() {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    }
                 }
-                todo = retry;
                 if !todo.is_empty() {
-                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    tracing::warn!("seed: pages not fetched: {todo:?}");
                 }
-            }
-            if !todo.is_empty() {
-                tracing::warn!("seed: pages not fetched: {todo:?}");
+                // пока собирали, запросили rebuild — собираем заново с пустого листа
+                if !app.reseed.swap(false, Ordering::Relaxed) {
+                    break;
+                }
+                tracing::info!("seed: reseed requested, rerun");
             }
             app.seeding.store(false, Ordering::Relaxed);
-            tracing::info!("playlist: seeded, {} channels", app.playlist.snapshot().len());
+            tracing::info!(
+                "playlist: seeded, {} channels",
+                app.playlist.snapshot().len()
+            );
         });
     }
 
