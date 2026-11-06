@@ -326,7 +326,7 @@ pub async fn list_channels(
     State(app): State<Arc<App>>,
     Query(q): Query<ChannelsQuery>,
 ) -> Json<Vec<crate::playlist::Channel>> {
-    app.kick_seed();
+    app.kick_seed(false);
     app.playlist.ensure_fresh(app.cfg.playlist_ttl_secs);
     let chans = app.playlist.snapshot();
     Json(
@@ -360,7 +360,7 @@ pub async fn list_channels(
 
 #[utoipa::path(get, path = "/api/channels/categories", responses((status = 200, body = [CategoryInfo], description = "Категории движка (docs.acestream.net: list-of-categories) с количеством каналов")))]
 pub async fn list_categories(State(app): State<Arc<App>>) -> Json<Vec<CategoryInfo>> {
-    app.kick_seed();
+    app.kick_seed(false);
     app.playlist.ensure_fresh(app.cfg.playlist_ttl_secs);
     let chans = app.playlist.snapshot();
     let mut m: BTreeMap<String, u32> = BTreeMap::new();
@@ -408,7 +408,7 @@ pub async fn search(
 )]
 pub async fn rebuild_channels(State(app): State<Arc<App>>) -> StatusCode {
     app.playlist.reset();
-    app.kick_seed();
+    app.kick_seed(true);
     StatusCode::ACCEPTED
 }
 

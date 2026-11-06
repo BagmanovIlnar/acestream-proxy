@@ -190,12 +190,23 @@ pub struct PlaylistHistory {
 }
 
 /// Engine /server/api search response -> playable channels (url = 40-hex infohash).
-/// Category entries in a /search response (for pagination: page is done when < page_size).
+/// Item count in a /search response (pagination: page is done at page_size items).
+/// Results are category entries with nested items — counting the entries made
+/// every complete page look "truncated" (40 categories ≈ 200 items ≠ 40 < 200).
 pub fn search_results_len(v: &serde_json::Value) -> usize {
     v.pointer("/result/results")
         .or_else(|| v.get("results"))
         .and_then(|x| x.as_array())
-        .map(|a| a.len())
+        .map(|a| {
+            a.iter()
+                .map(|c| {
+                    c.get("items")
+                        .and_then(|x| x.as_array())
+                        .map(|i| i.len())
+                        .unwrap_or(0)
+                })
+                .sum()
+        })
         .unwrap_or(0)
 }
 
@@ -421,6 +432,17 @@ mod tests {
         assert_eq!(chans[1].url, "http://ex.ru/torrent.acelive");
         assert_eq!(chans[1].group, "Фильмы");
         assert_ne!(chans[0].id, chans[1].id);
+    }
+
+    #[test]
+    fn search_len_counts_items_not_categories() {
+        let raw = serde_json::json!({"result": {"results": [
+            {"name": "A", "items": [{"infohash": "a"}, {"infohash": "b"}]},
+            {"name": "B", "items": [{"infohash": "c"}]},
+            {"name": "empty", "items": []}
+        ]}});
+        assert_eq!(search_results_len(&raw), 3);
+        assert_eq!(search_results_len(&serde_json::json!({})), 0);
     }
 
     #[test]

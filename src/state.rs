@@ -121,6 +121,13 @@ impl Drop for TsGuard {
     }
 }
 
+fn env_secs(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
+
 pub struct App {
     pub cfg: crate::Config,
     pub engine: Engine,
@@ -159,36 +166,38 @@ impl App {
         self.seeding.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Seed the playlist with live public broadcasts from the engine (search).
-    /// Runs in the background (the engine wedges its /server/api for ~30s under
-    /// request bursts, so queries are spaced out); fires when the cache is stale.
-    /// ponytail: 5 fixed genre queries × 10 items — the engine has no pagination,
-    /// full catalog needs an external m3u source.
-    pub fn kick_seed(self: &Arc<Self>) {
+    /// Catalog sweeper: rebuilds /api/channels from the engine (search), forever.
+    /// The source is a live p2p index — the engine randomly drops/truncates pages,
+    /// so a single run under-collects by a random amount (the floating channel
+    /// count between restarts). Sweeping every 30 min and merging (dedup +
+    /// last_seen refresh; ensure_fresh prunes the dead via TTL) converges the
+    /// count and heals any single under-collected run within one pause.
+    pub fn kick_seed(self: &Arc<Self>, resweep: bool) {
         use std::sync::atomic::Ordering;
-        // seed when cache is stale OR empty (a fresh-but-empty cache left by an
-        // old run must not block seeding for a whole TTL)
-        if !self.playlist.cache_stale(self.cfg.playlist_ttl_secs)
-            && !self.playlist.snapshot().is_empty()
-        {
-            return;
+        if resweep {
+            // явный rebuild: текущий сбор перезапустить немедленно
+            self.reseed.store(true, Ordering::Relaxed);
         }
         if self.seeding.swap(true, Ordering::Relaxed) {
-            // сидер уже бежит — попросим его перекрутить сбор, когда закончит (case: rebuild)
-            self.reseed.store(true, Ordering::Relaxed);
-            return;
+            return; // свипер уже бежит (флаг живёт весь срок жизни процесса)
         }
         let app = self.clone();
         self.reseed.store(false, Ordering::Relaxed);
         tokio::spawn(async move {
-            // полный каталог через /search пагинацией (200/страница). Движок случайно
-            // роняет/обрезает страницы, merge() дедуиплицирует — собираем пока все
-            // страницы не отдадутся (лимит раундов): пустая страница = конец каталога,
-            // недозаполненная = переспрашиваем (иначе счёт каналов «плавает»)
+            // полный каталог через /search пагинацией (200 позиций/страница).
+            // Страницы нестабильны (движок случайно роняет/обрезает их), поэтому
+            // один прогон даёт случайный недобор — собираем его в merge()
+            // (дедуипликация), повторяем витки каждые 30 минут; ensure_fresh(TTL)
+            // вымывает мёртвых — счёт сходится к «живым за TTL».
+            // Пустая страница = конец каталога, недозаполненная = переспрашиваем.
+            // Задержки — env (сек): ACESTREAM_SEED_DELAY_SECS (между страницами,
+            // раунд = 3×) и ACESTREAM_SEED_PAUSE_SECS (между витками).
             loop {
+                let delay = env_secs("ACESTREAM_SEED_DELAY_SECS", 10);
+                let pause = env_secs("ACESTREAM_SEED_PAUSE_SECS", 1800);
                 let mut todo: Vec<u32> = (0..20).collect();
                 for _ in 0..6 {
-                    if todo.is_empty() {
+                    if todo.is_empty() || app.reseed.load(Ordering::Relaxed) {
                         break;
                     }
                     let token = match app.engine.api_token().await {
@@ -200,6 +209,9 @@ impl App {
                     };
                     let mut retry: Vec<u32> = Vec::new();
                     for &page in &todo {
+                        if app.reseed.load(Ordering::Relaxed) {
+                            break; // rebuild: бросаем виток, полный сбор перезапустится
+                        }
                         // движок — однопоточный python-сервер, рвёт соединения при плотном темпе:
                         // две попытки на месте и большая пауза между страницами
                         let mut got: Option<serde_json::Value> = None;
@@ -228,27 +240,34 @@ impl App {
                             }
                             None => retry.push(page),
                         }
-                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        tokio::time::sleep(Duration::from_secs(delay)).await;
                     }
                     todo = retry;
                     if !todo.is_empty() {
-                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        tokio::time::sleep(Duration::from_secs(delay * 3)).await;
                     }
                 }
+                // rebuild (в т.ч. во время сбора) — сразу заново с первой страницы
+                if app.reseed.swap(false, Ordering::Relaxed) {
+                    tracing::info!("seed: reseed requested, rerun");
+                    continue;
+                }
                 if !todo.is_empty() {
-                    tracing::warn!("seed: pages not fetched: {todo:?}");
+                    tracing::warn!("seed: pages not fetched, next sweep retries: {todo:?}");
                 }
-                // пока собирали, запросили rebuild — собираем заново с пустого листа
-                if !app.reseed.swap(false, Ordering::Relaxed) {
-                    break;
+                tracing::info!(
+                    "playlist: sweep done, {} channels, next sweep in {pause}s",
+                    app.playlist.snapshot().len()
+                );
+                // пауза между витками; rebuild прерывает её немедленно (секундными тиками)
+                for _ in 0..pause {
+                    if app.reseed.swap(false, Ordering::Relaxed) {
+                        tracing::info!("seed: reseed requested, rerun");
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
-                tracing::info!("seed: reseed requested, rerun");
             }
-            app.seeding.store(false, Ordering::Relaxed);
-            tracing::info!(
-                "playlist: seeded, {} channels",
-                app.playlist.snapshot().len()
-            );
         });
     }
 
@@ -441,5 +460,113 @@ pub async fn janitor(app: Arc<App>) {
             }
         }
         app.playlist.ensure_fresh(app.cfg.playlist_ttl_secs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrd};
+
+    // страница ответа мок-движка: n позиций со смещением off (уникальные infohash)
+    fn page(n: usize, off: usize) -> serde_json::Value {
+        let items: Vec<_> = (0..n)
+            .map(|i| {
+                serde_json::json!({
+                    "name": format!("ch{}", i + off),
+                    "infohash": format!("{:040x}", i + off + 1),
+                    "categories": ["tv"],
+                })
+            })
+            .collect();
+        serde_json::json!({"result": {"results": [{"name": "cat", "items": items}]}})
+    }
+
+    async fn wait_for(f: impl Fn() -> bool, secs: u64) -> bool {
+        let dl = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
+        while tokio::time::Instant::now() < dl {
+            if f() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        f()
+    }
+
+    /// Свипер против мок-движка: сбор пагинацией, мгновенный пересбор по
+    /// rebuild во время паузы, восстановление после двойного нажатия.
+    #[tokio::test]
+    async fn sweeper_collects_and_rebuilds_immediately() {
+        std::env::set_var("ACESTREAM_SEED_DELAY_SECS", "0");
+        std::env::set_var("ACESTREAM_SEED_PAUSE_SECS", "1");
+
+        let fetches = Arc::new(AtomicUsize::new(0));
+        // p0 = 200 позиций, p1 = 50 (короткая), p2+ = пусто (конец каталога):
+        // виток = 8 запросов (p1 переспрашивается до лимита раундов)
+        let f = fetches.clone();
+        let mock = axum::Router::new()
+            .route(
+                "/server/api",
+                axum::routing::get(|| async {
+                    axum::Json(serde_json::json!({"token": "t"}))
+                }),
+            )
+            .route(
+                "/search",
+                axum::routing::get(
+                    move |q: axum::extract::Query<std::collections::HashMap<String, String>>| {
+                        f.fetch_add(1, AtomicOrd::Relaxed);
+                        let page_no: u32 = q.get("page").and_then(|p| p.parse().ok()).unwrap_or(0);
+                        async move {
+                            axum::Json(match page_no {
+                                0 => page(200, 0),
+                                1 => page(50, 1000),
+                                _ => serde_json::json!({"result": {"results": []}}),
+                            })
+                        }
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let tmp = std::env::temp_dir().join(format!("ace-sweeper-test-{}", std::process::id()));
+        let cfg = crate::Config {
+            engine_url: format!("http://{addr}"),
+            port: 0,
+            playlist_ttl_secs: 3600,
+            idle_secs: 30,
+            stale_secs: 60,
+            transcode_limit: 2,
+            tmp_dir: tmp.to_string_lossy().into_owned(),
+            public_url: None,
+        };
+        let app = Arc::new(App::new(cfg));
+
+        // 1) старт: свипер собирает каталог (200 + 50) и уходит в паузу
+        app.kick_seed(false);
+        assert!(
+            wait_for(|| app.playlist.snapshot().len() == 250, 10).await,
+            "sweep must collect the full catalog"
+        );
+        let after_sweep1 = fetches.load(AtomicOrd::Relaxed);
+
+        // 2) rebuild во время паузы: новый виток стартует сразу (~1с тик),
+        //    а не после полной паузы
+        app.kick_seed(true);
+        assert!(
+            wait_for(|| fetches.load(AtomicOrd::Relaxed) >= after_sweep1 + 8, 10).await,
+            "rebuild during pause must rerun the sweep immediately"
+        );
+
+        // 3) двойное нажатие rebuild: флаг один, но каталог пересобирается заново
+        app.playlist.reset();
+        app.kick_seed(true);
+        app.kick_seed(true);
+        assert!(
+            wait_for(|| app.playlist.snapshot().len() == 250, 10).await,
+            "double rebuild must still recollect the catalog"
+        );
     }
 }

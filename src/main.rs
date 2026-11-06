@@ -123,7 +123,7 @@ async fn main() {
     let cfg = Config::from_env();
     let port = cfg.port;
     let app = Arc::new(App::new(cfg));
-    app.kick_seed(); // background: fill /api/channels from engine search
+    app.kick_seed(false); // background sweeper: fills /api/channels from engine search
 
     {
         let a = Arc::clone(&app);
