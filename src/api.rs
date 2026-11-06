@@ -128,27 +128,32 @@ fn extract_search_items(v: &serde_json::Value) -> Vec<SearchItem> {
     // engine returns [{name, items: [...]}, ...]; flatten (self item if no nesting)
     let flat = arr
         .iter()
-        .flat_map(|c| c.get("items").and_then(|x| x.as_array()).cloned().unwrap_or_default())
+        .flat_map(|c| {
+            c.get("items")
+                .and_then(|x| x.as_array())
+                .cloned()
+                .unwrap_or_default()
+        })
         .chain(arr.iter().filter(|c| c.get("items").is_none()).cloned());
     flat.filter_map(|i| {
-            let cid = i
-                .get("content_id")
-                .and_then(|x| x.as_str())
-                .or_else(|| i.get("id").and_then(|x| x.as_str()))
-                .or_else(|| i.get("infohash").and_then(|x| x.as_str()))?;
-            let name = i
-                .get("name")
-                .and_then(|x| x.as_str())
-                .or_else(|| i.get("title").and_then(|x| x.as_str()))
-                .unwrap_or(cid)
-                .to_string();
-            Some(SearchItem {
-                name,
-                content_id: cid.to_string(),
-                bitrate: i.get("bitrate").and_then(|x| x.as_u64()),
-            })
+        let cid = i
+            .get("content_id")
+            .and_then(|x| x.as_str())
+            .or_else(|| i.get("id").and_then(|x| x.as_str()))
+            .or_else(|| i.get("infohash").and_then(|x| x.as_str()))?;
+        let name = i
+            .get("name")
+            .and_then(|x| x.as_str())
+            .or_else(|| i.get("title").and_then(|x| x.as_str()))
+            .unwrap_or(cid)
+            .to_string();
+        Some(SearchItem {
+            name,
+            content_id: cid.to_string(),
+            bitrate: i.get("bitrate").and_then(|x| x.as_u64()),
         })
-        .collect()
+    })
+    .collect()
 }
 
 fn stream_info(s: &Stream) -> StreamInfo {
@@ -187,7 +192,10 @@ fn stream_info(s: &Stream) -> StreamInfo {
 pub async fn health(State(app): State<Arc<App>>) -> Json<HealthInfo> {
     let engine = app.engine.ping().await.is_ok();
     let streams = app.streams.read().unwrap();
-    let clients: usize = streams.values().map(|s| s.clients.lock().unwrap().len()).sum();
+    let clients: usize = streams
+        .values()
+        .map(|s| s.clients.lock().unwrap().len())
+        .sum();
     Json(HealthInfo {
         status: "ok".into(),
         engine,
@@ -270,7 +278,7 @@ pub async fn stream_audio(
         .get_or_start(&id)
         .await
         .map_err(|m| e(StatusCode::NOT_FOUND, m))?;
-    let url = app.engine.ts_session_url(&s.content);
+    let url = app.self_stream_url(&s.id); // broadcast, не движок: 2-й коннект к сессии движок рвёт с 500
     let probe = s.probe.get_or_init(|| transcode::probe(url)).await;
     if probe.is_err() {
         // не кэшируем неудачу навсегда: сносим стрим, следующий запрос пересоздаст его со свежей сессией движка
@@ -366,7 +374,11 @@ pub async fn list_categories(State(app): State<Arc<App>>) -> Json<Vec<CategoryIn
             *m.entry(cat.to_string()).or_insert(0) += 1;
         }
     }
-    Json(m.into_iter().map(|(name, count)| CategoryInfo { name, count }).collect())
+    Json(
+        m.into_iter()
+            .map(|(name, count)| CategoryInfo { name, count })
+            .collect(),
+    )
 }
 
 #[utoipa::path(

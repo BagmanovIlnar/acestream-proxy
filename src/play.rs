@@ -132,7 +132,10 @@ pub async fn hls_index(
     };
     s.touch(&client_ip(&headers, &addr), &ua(&headers), ClientKind::Hls);
     if s.hls_index_url().is_none() {
-        return err(StatusCode::NOT_FOUND, "engine provides no HLS for this stream");
+        return err(
+            StatusCode::NOT_FOUND,
+            "engine provides no HLS for this stream",
+        );
     }
     let url = s.hls_index_url().unwrap().to_string();
     proxy_url(&app, &url, true).await
@@ -194,8 +197,12 @@ pub async fn browser_master(
         Ok(s) => s,
         Err(e) => return err(StatusCode::NOT_FOUND, e),
     };
-    s.touch(&client_ip(&headers, &addr), &ua(&headers), ClientKind::Browser);
-    let url = app.engine.ts_session_url(&s.content);
+    s.touch(
+        &client_ip(&headers, &addr),
+        &ua(&headers),
+        ClientKind::Browser,
+    );
+    let url = app.self_stream_url(&s.id); // broadcast, не движок: 2-й коннект к сессии движок рвёт с 500
     let probe = s.probe.get_or_init(|| transcode::probe(url)).await;
     if probe.is_err() {
         // не кэшируем неудачу навсегда: сносим стрим, следующий запрос пересоздаст его со свежей сессией движка
@@ -203,7 +210,12 @@ pub async fn browser_master(
     }
     let info = match probe {
         Ok(i) => i.clone(),
-        Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, format!("probe failed: {e}")),
+        Err(e) => {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("probe failed: {e}"),
+            )
+        }
     };
     if transcode::browser_ok(&info) && s.hls_index_url().is_some() && is_safari(&ua(&headers)) {
         // Safari умеет нативный HLS — отдаём дёшево, без транскода.
@@ -212,11 +224,26 @@ pub async fn browser_master(
     }
     let t = match app
         .transcodes
-        .ensure(&s, &app.engine.ts_session_url(&s.content), &app.cfg.tmp_dir)
+        .ensure(&s, &app.self_stream_url(&s.id), &app.cfg.tmp_dir)
         .await
     {
         Ok(t) => t,
         Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, e),
+    };
+    // ffmpeg умер (вход оборвался) — перезапускаем, иначе отдаём мёртвый плейлист с ENDLIST
+    let t = if t.finished().await {
+        tracing::warn!(stream = %s.id, "transcode died, restarting");
+        app.transcodes.kill(&s.id).await;
+        match app
+            .transcodes
+            .ensure(&s, &app.self_stream_url(&s.id), &app.cfg.tmp_dir)
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, e),
+        }
+    } else {
+        t
     };
     // ждём пока ffmpeg напишет master-плейлист; движок отдаёт первые кадры с задержкой,
     // поэтому окно щедрое — иначе 504 на холодном старте
@@ -228,7 +255,10 @@ pub async fn browser_master(
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     if !master.exists() {
-        return err(StatusCode::GATEWAY_TIMEOUT, "transcode did not start (see ffmpeg logs)");
+        return err(
+            StatusCode::GATEWAY_TIMEOUT,
+            "transcode did not start (see ffmpeg logs)",
+        );
     }
     serve_disk(master).await
 }
@@ -251,7 +281,11 @@ pub async fn browser_seg(
     let Some(s) = app.find(&key) else {
         return err(StatusCode::NOT_FOUND, "stream not active");
     };
-    s.touch(&client_ip(&headers, &addr), &ua(&headers), ClientKind::Browser);
+    s.touch(
+        &client_ip(&headers, &addr),
+        &ua(&headers),
+        ClientKind::Browser,
+    );
     let Some(t) = app.transcodes.get(&s.id) else {
         return err(
             StatusCode::NOT_FOUND,
@@ -275,24 +309,23 @@ pub async fn playlist_m3u(
 ) -> Response {
     app.kick_seed();
     app.playlist.ensure_fresh(app.cfg.playlist_ttl_secs);
-    let host = app
-        .cfg
-        .public_url
-        .clone()
-        .unwrap_or_else(|| {
-            headers
-                .get(header::HOST)
-                .and_then(|h| h.to_str().ok())
-                .unwrap_or("localhost:8080")
-                .to_string()
-        });
+    let host = app.cfg.public_url.clone().unwrap_or_else(|| {
+        headers
+            .get(header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("localhost:8080")
+            .to_string()
+    });
     let base = if host.starts_with("http") {
         host
     } else {
         format!("http://{host}")
     };
     let esc = |s: &str| s.replace('"', "'");
-    let transcode = q.get("mode").map(|m| m.as_str() == "transcode").unwrap_or(false);
+    let transcode = q
+        .get("mode")
+        .map(|m| m.as_str() == "transcode")
+        .unwrap_or(false);
     let mut out = String::from("#EXTM3U\n");
     for ch in app.playlist.snapshot().iter() {
         out.push_str(&format!(
@@ -312,7 +345,10 @@ pub async fn playlist_m3u(
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "audio/x-mpegurl"),
-            (header::CONTENT_DISPOSITION, "attachment; filename=\"playlist.m3u\""),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"playlist.m3u\"",
+            ),
             (header::CACHE_CONTROL, "no-store"),
         ],
         out,

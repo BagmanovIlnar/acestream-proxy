@@ -46,7 +46,14 @@ pub async fn probe(ts_url: String) -> Result<CodecInfo, String> {
 async fn probe_once(ts_url: &str) -> Result<CodecInfo, String> {
     let out = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         tokio::process::Command::new("ffprobe")
-            .args(["-v", "error", "-print_format", "json", "-show_streams", ts_url])
+            .args([
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_streams",
+                ts_url,
+            ])
             .output()
             .await
     })
@@ -54,7 +61,10 @@ async fn probe_once(ts_url: &str) -> Result<CodecInfo, String> {
     .map_err(|_| "ffprobe timeout".to_string())?
     .map_err(|e| format!("ffprobe: {e}"))?;
     if !out.status.success() {
-        let err: String = String::from_utf8_lossy(&out.stderr).chars().take(200).collect();
+        let err: String = String::from_utf8_lossy(&out.stderr)
+            .chars()
+            .take(200)
+            .collect();
         return Err(format!("ffprobe: {err}"));
     }
     let v: serde_json::Value =
@@ -83,17 +93,22 @@ async fn probe_once(ts_url: &str) -> Result<CodecInfo, String> {
 }
 
 fn ffmpeg_args(ts_url: &str, dir: &Path, info: &CodecInfo) -> Vec<String> {
-    let n = info.audio.len().min(4);
+    let has_audio = !info.audio.is_empty();
+    // ponytail: одна варианта (video + первая аудиодорожка). ffmpeg 5/9 с var_stream_map
+    // не резолвит %v для аудио-вариантов: плейлисты называются буквально "s???.m3u8",
+    // обе дорожки пишутся в один файл — hls.js не может их загрузить. Мультитрек вернуть,
+    // только если разобраться с генерацией master вручную.
     let mut a: Vec<String> = vec![
         "-hide_banner".into(),
         "-loglevel".into(),
         "warning".into(),
         "-i".into(),
         ts_url.to_string(),
+        "-map".into(),
+        "0:v:0".into(),
     ];
-    a.extend(["-map".into(), "0:v:0".into()]);
-    for i in 0..n {
-        a.extend(["-map".into(), format!("0:a:{i}")]);
+    if has_audio {
+        a.extend(["-map".into(), "0:a:0".into()]);
     }
     a.extend([
         "-c:v".into(),
@@ -105,7 +120,7 @@ fn ffmpeg_args(ts_url: &str, dir: &Path, info: &CodecInfo) -> Vec<String> {
         "-sc_threshold".into(),
         "0".into(),
     ]);
-    if n > 0 {
+    if has_audio {
         a.extend([
             "-c:a".into(),
             "aac".into(),
@@ -126,36 +141,9 @@ fn ffmpeg_args(ts_url: &str, dir: &Path, info: &CodecInfo) -> Vec<String> {
         "delete_segments+independent_segments".into(),
         "-hls_segment_type".into(),
         "fmp4".into(),
+        // одна варианта: master.m3u8 = медиа-плейлист, никаких var_stream_map
+        dir.join("master.m3u8").to_string_lossy().into_owned(),
     ]);
-    if n > 0 {
-        // one encode, each audio track becomes an alternate AUDIO rendition in the master playlist
-        let mut vsm = String::from("v:0,agroup:aud");
-        for i in 0..n {
-            let t = &info.audio[i];
-            let mut e = format!("a:{i},agroup:aud");
-            if i == 0 {
-                e.push_str(",default:yes");
-            }
-            if let Some(lang) = &t.lang {
-                if lang.len() <= 3 && lang.chars().all(|c| c.is_ascii_alphanumeric()) {
-                    e.push_str(&format!(",language:{lang}"));
-                }
-            }
-            e.push_str(&format!(",name:{}", t.lang.clone().unwrap_or_else(|| format!("Track{}", i + 1))));
-            vsm.push(' ');
-            vsm.push_str(&e);
-        }
-        a.extend([
-            "-master_pl_name".into(),
-            "master.m3u8".into(),
-            "-var_stream_map".into(),
-            vsm,
-            dir.join("s%v.m3u8").to_string_lossy().into_owned(),
-        ]);
-    } else {
-        // no audio: single media playlist served as master
-        a.push(dir.join("master.m3u8").to_string_lossy().into_owned());
-    }
     a
 }
 
@@ -163,6 +151,18 @@ pub struct Transcode {
     pub dir: PathBuf,
     child: AsyncMutex<tokio::process::Child>,
     _permit: OwnedSemaphorePermit, // held while running: caps concurrent transcodes
+}
+
+impl Transcode {
+    /// ffmpeg exited (input died / crashed): playlist is stale (ENDLIST).
+    pub async fn finished(&self) -> bool {
+        self.child
+            .lock()
+            .await
+            .try_wait()
+            .map(|o| o.is_some())
+            .unwrap_or(true)
+    }
 }
 
 #[derive(Clone)]
@@ -179,16 +179,25 @@ impl Transcodes {
         }
     }
 
-    pub fn contains(&self, id: &str) -> bool {
-        self.map.lock().unwrap().contains_key(id)
-    }
-
     pub fn get(&self, id: &str) -> Option<Arc<Transcode>> {
         self.map.lock().unwrap().get(id).cloned()
     }
 
+    /// Есть живой ffmpeg (мёртвый транскод не должен держать стрим и слот семафора).
+    pub async fn contains_live(&self, id: &str) -> bool {
+        match self.get(id) {
+            Some(t) => !t.finished().await,
+            None => false,
+        }
+    }
+
     /// Start (or return the running) transcode for the stream. Requires probe done.
-    pub async fn ensure(&self, stream: &Arc<Stream>, ts_url: &str, tmp_dir: &str) -> Result<Arc<Transcode>, String> {
+    pub async fn ensure(
+        &self,
+        stream: &Arc<Stream>,
+        ts_url: &str,
+        tmp_dir: &str,
+    ) -> Result<Arc<Transcode>, String> {
         if let Some(t) = self.get(&stream.id) {
             return Ok(t);
         }
@@ -198,9 +207,9 @@ impl Transcodes {
             .cloned()
             .ok_or_else(|| "codec info not probed yet".to_string())?
             .map_err(|e| format!("probe failed: {e}"))?;
-        let permit = Arc::clone(&self.sem)
-            .try_acquire_owned()
-            .map_err(|_| "transcode limit reached, close other transcodes or raise TRANSCODE_LIMIT".to_string())?;
+        let permit = Arc::clone(&self.sem).try_acquire_owned().map_err(|_| {
+            "transcode limit reached, close other transcodes or raise TRANSCODE_LIMIT".to_string()
+        })?;
         let dir = Path::new(tmp_dir).join(&stream.id);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
@@ -218,7 +227,9 @@ impl Transcodes {
                 loop {
                     match stderr.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
-                        Ok(n) => tracing::warn!(target: "ffmpeg", "{}", String::from_utf8_lossy(&buf[..n]).trim_end()),
+                        Ok(n) => {
+                            tracing::warn!(target: "ffmpeg", "{}", String::from_utf8_lossy(&buf[..n]).trim_end())
+                        }
                     }
                 }
             });
@@ -228,7 +239,10 @@ impl Transcodes {
             child: AsyncMutex::new(child),
             _permit: permit,
         });
-        self.map.lock().unwrap().insert(stream.id.clone(), t.clone());
+        self.map
+            .lock()
+            .unwrap()
+            .insert(stream.id.clone(), t.clone());
         tracing::info!(stream = %stream.id, "transcode started -> {}", dir.display());
         Ok(t)
     }
@@ -244,5 +258,32 @@ impl Transcodes {
         }
         let _ = tokio::fs::remove_dir_all(&t.dir).await;
         tracing::info!(stream = %id, "transcode stopped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(audio: usize) -> CodecInfo {
+        CodecInfo {
+            video: Some("hevc".into()),
+            audio: (0..audio)
+                .map(|i| AudioTrack { index: i, codec: "ac3".into(), lang: None })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn single_variant_no_var_stream_map() {
+        let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), &info(2));
+        // ровно одна аудио-дорожка, без var_stream_map/master_pl_name (ffmpeg их ломает)
+        assert_eq!(args.iter().filter(|a| a.as_str() == "0:a:0").count(), 1);
+        assert!(!args.iter().any(|a| a.contains("0:a:1")));
+        assert!(!args.iter().any(|a| a.contains("var_stream_map") || a.contains("master_pl_name")));
+        assert_eq!(args.last().unwrap(), "/tmp/t/master.m3u8");
+        // без аудио: только видео
+        let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), &info(0));
+        assert!(!args.iter().any(|a| a.starts_with("0:a")));
     }
 }

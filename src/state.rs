@@ -48,17 +48,6 @@ pub struct Stream {
 }
 
 impl Stream {
-    /// MPEG-TS url (by extension; falls back between the two engine urls).
-    pub fn ts_url(&self) -> &str {
-        let a = &self.engine.playback_url;
-        let b = &self.engine.playback_url_for_external_player;
-        if b.ends_with(".ts") || (a.ends_with(".m3u8") && !b.is_empty()) {
-            b
-        } else {
-            a
-        }
-    }
-
     /// HLS playlist url, if the engine provides one.
     pub fn hls_index_url(&self) -> Option<&str> {
         let a = &self.engine.playback_url;
@@ -288,6 +277,13 @@ impl App {
         self.streams.read().unwrap().get(id).cloned()
     }
 
+    /// Loopback TS url: the engine serves ONE downstream client per session, so
+    /// probe/ffmpeg must consume the same broadcast as everyone else (a direct
+    /// second engine connection fails with "failed to load content").
+    pub fn self_stream_url(&self, id: &str) -> String {
+        format!("http://127.0.0.1:{}/stream/{id}", self.cfg.port)
+    }
+
     /// Get or create the engine session for the input (any of resolve_input forms).
     pub async fn get_or_start(&self, input: &str) -> Result<Arc<Stream>, String> {
         let content = self.resolve_input(input)?;
@@ -418,9 +414,15 @@ pub async fn janitor(app: Arc<App>) {
                         || now.duration_since(e.last_seen).as_secs() < app.cfg.stale_secs
                 });
             }
+            // транскод без браузерных зрителей = жжём CPU впустую (и слот лимита)
+            let has_viewers = s.clients.lock().unwrap().values().any(|c| c.kind != ClientKind::Ts);
+            if !has_viewers && app.transcodes.contains_live(&s.id).await {
+                app.transcodes.kill(&s.id).await;
+                tracing::info!(stream = %s.id, "transcode killed: no viewers");
+            }
             let should_kill = {
                 let empty = s.clients.lock().unwrap().is_empty();
-                let has_transcode = app.transcodes.contains(&s.id);
+                let has_transcode = app.transcodes.contains_live(&s.id).await;
                 if empty && !has_transcode {
                     let mut es = s.empty_since.lock().unwrap();
                     if es.is_none() {

@@ -47,10 +47,7 @@ fn normalize_engine_uri(raw: &str) -> String {
     if !s.starts_with("http://") && !s.starts_with("https://") {
         s = format!("http://{s}");
     }
-    let auth = s
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(&s);
+    let auth = s.split_once("://").map(|(_, rest)| rest).unwrap_or(&s);
     let has_port = auth
         .split(['/', '?'])
         .next()
@@ -75,11 +72,20 @@ impl Config {
                 .unwrap_or(21600),
             idle_secs: envs("STREAM_IDLE_SECS", "30").parse().unwrap_or(30),
             stale_secs: envs("CLIENT_STALE_SECS", "60").parse().unwrap_or(60),
-            transcode_limit: envs("TRANSCODE_LIMIT", "")
-                .parse()
-                .unwrap_or_else(|_| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2)),
-            tmp_dir: envs("TMP_DIR", &std::env::temp_dir().join("acestream-proxy").to_string_lossy()),
-            public_url: std::env::var("PUBLIC_URL").ok().filter(|v| !v.trim().is_empty()),
+            transcode_limit: envs("TRANSCODE_LIMIT", "").parse().unwrap_or_else(|_| {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(2)
+            }),
+            tmp_dir: envs(
+                "TMP_DIR",
+                &std::env::temp_dir()
+                    .join("acestream-proxy")
+                    .to_string_lossy(),
+            ),
+            public_url: std::env::var("PUBLIC_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
         }
     }
 }
@@ -125,7 +131,10 @@ async fn main() {
     }
 
     let router = Router::new()
-        .route("/", get(|| async { axum::response::Redirect::temporary("/swagger-ui") }))
+        .route(
+            "/",
+            get(|| async { axum::response::Redirect::temporary("/swagger-ui") }),
+        )
         .nest("/api", api::router())
         .route("/stream/{id}", get(play::ts))
         .route("/stream/{id}/index.m3u8", get(play::hls_index))
@@ -146,7 +155,10 @@ async fn main() {
         ver = env!("CARGO_PKG_VERSION"),
         engine = app.engine.base
     );
-    axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .expect("server error");
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("server error");
 }

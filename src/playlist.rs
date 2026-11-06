@@ -141,7 +141,13 @@ pub fn parse_m3u(text: &str) -> Vec<Channel> {
             url,
             group: non_empty(&attrs, "group-title").unwrap_or_else(|| "Мои".into()),
             categories: non_empty(&attrs, "x-cats")
-                .map(|s| s.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect())
+                .map(|s| {
+                    s.split(',')
+                        .map(str::trim)
+                        .filter(|x| !x.is_empty())
+                        .map(String::from)
+                        .collect()
+                })
                 .unwrap_or_default(),
             logo: non_empty(&attrs, "tvg-logo"),
             tvg_id: non_empty(&attrs, "tvg-id"),
@@ -208,12 +214,21 @@ pub fn channels_from_search(v: &serde_json::Value) -> Vec<Channel> {
                 .and_then(|i| i.get("url"))
                 .and_then(|u| u.as_str())
                 .map(String::from);
-            for it in cat.get("items").and_then(|x| x.as_array()).into_iter().flatten() {
+            for it in cat
+                .get("items")
+                .and_then(|x| x.as_array())
+                .into_iter()
+                .flatten()
+            {
                 let ih = match it.get("infohash").and_then(|x| x.as_str()) {
                     Some(s) => s,
                     None => continue,
                 };
-                if it.get("disabled").and_then(|x| x.as_bool()).unwrap_or(false) {
+                if it
+                    .get("disabled")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 out.push(Channel {
@@ -291,7 +306,12 @@ impl PlaylistHistory {
     }
 
     pub fn by_id(&self, id: &str) -> Option<Channel> {
-        self.channels.read().unwrap().iter().find(|c| c.id == id).cloned()
+        self.channels
+            .read()
+            .unwrap()
+            .iter()
+            .find(|c| c.id == id)
+            .cloned()
     }
 
     /// Remember/refresh a started stream (upsert by content). Rewrites the m3u file.
@@ -309,7 +329,11 @@ impl PlaylistHistory {
         } else {
             chs.push(Channel {
                 id,
-                name: name.map(str::trim).filter(|n| !n.is_empty()).map(String::from).unwrap_or_else(|| default_name(content)),
+                name: name
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                    .map(String::from)
+                    .unwrap_or_else(|| default_name(content)),
                 url: content.to_string(),
                 group: "Мои".into(),
                 categories: Vec::new(),
@@ -365,7 +389,10 @@ impl PlaylistHistory {
         for c in incoming {
             match chs.iter_mut().find(|e| e.id == c.id) {
                 Some(e) => e.last_seen = now,
-                None => chs.push(Channel { last_seen: now, ..c }),
+                None => chs.push(Channel {
+                    last_seen: now,
+                    ..c
+                }),
             }
         }
         let text = to_m3u(&chs);
@@ -449,7 +476,10 @@ mod tests {
         // expired cache: only channels touched within ttl survive
         std::thread::sleep(std::time::Duration::from_millis(1100));
         h2.ensure_fresh(1);
-        assert!(h2.snapshot().is_empty(), "expired playlist regenerated empty");
+        assert!(
+            h2.snapshot().is_empty(),
+            "expired playlist regenerated empty"
+        );
 
         // and restart with expired cache starts clean
         let h3 = PlaylistHistory::new(&dir_str, 3600);

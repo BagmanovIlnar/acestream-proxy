@@ -69,7 +69,12 @@ impl Engine {
             let rest_start = scheme_end + 3;
             let rest = &url[rest_start..];
             let path_start = rest.find(['/', '?']).unwrap_or(rest.len());
-            return format!("{}://{}{}", &url[..scheme_end], self.engine_host(), &rest[path_start..]);
+            return format!(
+                "{}://{}{}",
+                &url[..scheme_end],
+                self.engine_host(),
+                &rest[path_start..]
+            );
         }
         url.to_string()
     }
@@ -114,8 +119,8 @@ impl Engine {
         }
         // infohash= responses nest fields under "response", id= responses are flat
         let body = v.get("response").filter(|r| r.is_object()).unwrap_or(&v);
-        let mut s: EngineStream = serde_json::from_value(body.clone())
-            .map_err(|e| format!("engine response: {e}"))?;
+        let mut s: EngineStream =
+            serde_json::from_value(body.clone()).map_err(|e| format!("engine response: {e}"))?;
         s.playback_url = self.rehost(&s.playback_url);
         s.playback_url_for_external_player = self.rehost(&s.playback_url_for_external_player);
         if s.playback_url.is_empty() && s.playback_url_for_external_player.is_empty() {
@@ -216,13 +221,22 @@ mod tests {
 
     #[test]
     fn query_building() {
-        assert_eq!(content_query("0123456789abcdef0123456789abcdef"), "id=0123456789abcdef0123456789abcdef");
-        assert_eq!(content_query("c88509fd554d301028625518bebf2376d01156e0"), "infohash=c88509fd554d301028625518bebf2376d01156e0");
+        assert_eq!(
+            content_query("0123456789abcdef0123456789abcdef"),
+            "id=0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            content_query("c88509fd554d301028625518bebf2376d01156e0"),
+            "infohash=c88509fd554d301028625518bebf2376d01156e0"
+        );
         assert_eq!(
             content_query("acestream://0123456789abcdef0123456789abcdef"),
             "id=0123456789abcdef0123456789abcdef"
         );
-        assert_eq!(content_query("http://x.ru/a.torrent"), "url=http%3A%2F%2Fx.ru%2Fa.torrent");
+        assert_eq!(
+            content_query("http://x.ru/a.torrent"),
+            "url=http%3A%2F%2Fx.ru%2Fa.torrent"
+        );
         assert!(content_query("magnet:?xt=urn:btih:abc").starts_with("url=magnet%3A"));
     }
 }
