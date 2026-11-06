@@ -163,6 +163,10 @@ impl App {
         }
     }
 
+    pub fn is_seeding(&self) -> bool {
+        self.seeding.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Seed the playlist with live public broadcasts from the engine (search).
     /// Runs in the background (the engine wedges its /server/api for ~30s under
     /// request bursts, so queries are spaced out); fires when the cache is stale.

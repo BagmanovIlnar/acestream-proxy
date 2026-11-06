@@ -85,6 +85,8 @@ pub struct HealthInfo {
     pub version: String,
     pub active_streams: usize,
     pub clients: usize,
+    /// Сбор каталога каналов идёт в фоне
+    pub seeding: bool,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -192,6 +194,7 @@ pub async fn health(State(app): State<Arc<App>>) -> Json<HealthInfo> {
         version: env!("CARGO_PKG_VERSION").into(),
         active_streams: streams.len(),
         clients,
+        seeding: app.is_seeding(),
     })
 }
 
