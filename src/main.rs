@@ -132,7 +132,8 @@ async fn main() {
         .route("/stream/{id}/{*seg}", get(play::hls_seg))
         .route("/play/{id}/master.m3u8", get(play::browser_master))
         .route("/play/{id}/{file}", get(play::browser_seg))
-        .route("/playlist.m3u", get(play::playlist_m3u))
+        .route("/api/playlist.m3u", get(play::playlist_m3u))
+        .route("/playlist.m3u", get(play::playlist_m3u)) // legacy alias
         .with_state(Arc::clone(&app))
         .merge(SwaggerUi::new("/swagger-ui").url("/api/openapi.json", ApiDoc::openapi()))
         .layer(CorsLayer::permissive());

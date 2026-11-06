@@ -65,7 +65,7 @@ ENGINE_URL=http://127.0.0.1:6878 ./target/release/acestream-proxy
 | GET | `/api/clients` | все клиенты и что смотрят |
 | GET | `/api/channels?category=&country=` | каналы (category — категория движка: tv, sport, movies, …; country — фильтр по подстроке) |
 | GET | `/api/channels/categories` | категории движка с количеством каналов |
-| GET | `/playlist.m3u` | плейлист для VLC/TV |
+| GET | `/api/playlist.m3u` | плейлист для VLC/TV (`/playlist.m3u` — старый алиас) |
 
 Полная схема: `/swagger-ui`, OpenAPI json: `/api/openapi.json`. CORS открыт — веб-интерфейс можно размещать отдельно.
 
