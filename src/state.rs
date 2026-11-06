@@ -182,10 +182,14 @@ impl App {
         }
         let app = self.clone();
         tokio::spawn(async move {
-            // up to 3 passes: the engine's /server/api randomly drops some queries,
-            // merge() dedupes so re-running a pass is idempotent
-            for _ in 0..3 {
-                let mut failed = false;
+            // full catalog via /search pagination (200/page); failed pages are
+            // retried for up to 4 rounds — the engine randomly drops requests,
+            // merge() dedupes so re-fetching is idempotent
+            let mut todo: Vec<u32> = (0..20).collect();
+            for _ in 0..4 {
+                if todo.is_empty() {
+                    break;
+                }
                 let token = match app.engine.api_token().await {
                     Ok(t) => t,
                     Err(e) => {
@@ -193,22 +197,35 @@ impl App {
                         break;
                     }
                 };
-                for q in ["", "sport", "news", "movies", "kids"] {
-                    match app.engine.search_with(&token, Some(q)).await {
-                        Ok(raw) => app
-                            .playlist
-                            .merge(crate::playlist::channels_from_search(&raw)),
+                let mut retry: Vec<u32> = Vec::new();
+                for &page in &todo {
+                    match app
+                        .engine
+                        .search_page(&token, None, None, page, 200)
+                        .await
+                    {
+                        Ok(raw) => {
+                            let last = crate::playlist::search_results_len(&raw) < 200;
+                            app.playlist
+                                .merge(crate::playlist::channels_from_search(&raw));
+                            if last {
+                                retry.retain(|p| *p <= page); // higher pages don't exist
+                            }
+                        }
                         Err(e) => {
-                            failed = true;
-                            tracing::warn!("seed search '{q}' failed: {e}");
+                            retry.push(page);
+                            tracing::warn!("seed page {page} failed: {e}");
                         }
                     }
-                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    tokio::time::sleep(Duration::from_secs(5)).await;
                 }
-                if !failed {
-                    break;
+                todo = retry;
+                if !todo.is_empty() {
+                    tokio::time::sleep(Duration::from_secs(15)).await;
                 }
-                tokio::time::sleep(Duration::from_secs(20)).await;
+            }
+            if !todo.is_empty() {
+                tracing::warn!("seed: pages not fetched: {todo:?}");
             }
             app.seeding.store(false, Ordering::Relaxed);
             tracing::info!("playlist: seeded, {} channels", app.playlist.snapshot().len());

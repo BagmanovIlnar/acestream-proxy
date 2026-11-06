@@ -184,6 +184,15 @@ pub struct PlaylistHistory {
 }
 
 /// Engine /server/api search response -> playable channels (url = 40-hex infohash).
+/// Category entries in a /search response (for pagination: page is done when < page_size).
+pub fn search_results_len(v: &serde_json::Value) -> usize {
+    v.pointer("/result/results")
+        .or_else(|| v.get("results"))
+        .and_then(|x| x.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0)
+}
+
 pub fn channels_from_search(v: &serde_json::Value) -> Vec<Channel> {
     let mut out = Vec::new();
     if let Some(cats) = v
@@ -191,8 +200,15 @@ pub fn channels_from_search(v: &serde_json::Value) -> Vec<Channel> {
         .or_else(|| v.get("results"))
         .and_then(|x| x.as_array())
     {
-        for it in cats.iter().filter_map(|c| c.get("items")) {
-            for it in it.as_array().into_iter().flatten() {
+        for cat in cats.iter() {
+            let logo = cat
+                .get("icons")
+                .and_then(|x| x.as_array())
+                .and_then(|a| a.first())
+                .and_then(|i| i.get("url"))
+                .and_then(|u| u.as_str())
+                .map(String::from);
+            for it in cat.get("items").and_then(|x| x.as_array()).into_iter().flatten() {
                 let ih = match it.get("infohash").and_then(|x| x.as_str()) {
                     Some(s) => s,
                     None => continue,
@@ -227,7 +243,7 @@ pub fn channels_from_search(v: &serde_json::Value) -> Vec<Channel> {
                                 .collect()
                         })
                         .unwrap_or_default(),
-                    logo: None,
+                    logo: logo.clone(),
                     tvg_id: None,
                     country: it
                         .get("countries")

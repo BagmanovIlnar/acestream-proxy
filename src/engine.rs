@@ -131,7 +131,7 @@ impl Engine {
     /// /server/api (get_api_access_token + method=search).
     pub async fn search(&self, q: Option<&str>) -> Result<serde_json::Value, String> {
         let token = self.api_token().await?;
-        self.search_with(&token, q).await
+        self.search_page(&token, q, None, 0, 50).await
     }
 
     pub async fn api_token(&self) -> Result<String, String> {
@@ -156,22 +156,30 @@ impl Engine {
 
     /// One search call with an already fetched token (reuse it: the engine's
     /// /server_api wedges for ~30s under request bursts).
-    pub async fn search_with(
+    pub async fn search_page(
         &self,
         token: &str,
         q: Option<&str>,
+        category: Option<&str>,
+        page: u32,
+        page_size: u32,
     ) -> Result<serde_json::Value, String> {
         let mut search_url = format!(
-            "{}/server/api?method=search&token={}",
+            "{}/search?token={}&page={}&page_size={}",
             self.base,
-            urlencode(token)
+            urlencode(token),
+            page,
+            page_size.min(200)
         );
+        if let Some(c) = category.filter(|c| !c.trim().is_empty()) {
+            search_url.push_str(&format!("&category={}", urlencode(c.trim())));
+        }
         if let Some(q) = q.filter(|q| !q.trim().is_empty()) {
             search_url.push_str(&format!("&query={}", urlencode(q.trim())));
         }
         self.http
             .get(&search_url)
-            .timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(30))
             .send()
             .await
             .map_err(|e| format!("search request failed: {e}"))?
