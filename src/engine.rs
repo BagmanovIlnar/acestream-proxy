@@ -1,4 +1,4 @@
-use crate::util::{truncate, urlencode};
+use crate::util::{chain, truncate, urlencode};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -106,7 +106,7 @@ impl Engine {
             .timeout(Duration::from_secs(60))
             .send()
             .await
-            .map_err(|e| format!("engine request failed: {e}"))?;
+            .map_err(|e| format!("engine request failed: {}", chain(&e)))?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -168,7 +168,7 @@ impl Engine {
             .timeout(Duration::from_secs(10))
             .send()
             .await
-            .map_err(|e| format!("token request failed: {e}"))?
+            .map_err(|e| format!("token request failed: {}", chain(&e)))?
             .json()
             .await
             .map_err(|e| format!("token response: {e}"))?;
@@ -208,7 +208,7 @@ impl Engine {
             .timeout(Duration::from_secs(30))
             .send()
             .await
-            .map_err(|e| format!("search request failed: {e}"))?
+            .map_err(|e| format!("search request failed: {}", chain(&e)))?
             .json()
             .await
             .map_err(|e| format!("search response: {e}"))
