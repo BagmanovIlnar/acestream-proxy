@@ -54,6 +54,8 @@ ENGINE_URL=http://127.0.0.1:6878 ./target/release/acestream-proxy
 | `STREAM_IDLE_SECS` | `30` | сколько стрим живёт без зрителей |
 | `CLIENT_STALE_SECS` | `60` | HLS/браузер-клиент считается ушедшим |
 | `TRANSCODE_LIMIT` | кол-во ядер | максимум одновременных транскодов |
+| `FFMPEG_PRESET` | `veryfast` | пресет x264 (`ultrafast` — вдвое-втрое дешевле CPU, больше битрейт) |
+| `FFMPEG_SCALE` | нет | даунскейл видео перед кодированием, напр. `720` (×3–4 дешевле CPU) |
 | `TMP_DIR` | `/tmp/acestream-proxy` | сегменты ffmpeg |
 | `PUBLIC_URL` | Host-заголовок | override хоста в `/playlist.m3u` |
 

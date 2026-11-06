@@ -27,6 +27,43 @@ pub fn browser_ok(c: &CodecInfo) -> bool {
     v_ok && a_ok
 }
 
+/// Что ffmpeg делает с дорожками: copy — ничего не кодирует (CPU ≈ 0),
+/// encode — перекодирует для браузера.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct EncodeMode {
+    pub video_copy: bool,
+    pub audio_copy: bool,
+}
+
+impl EncodeMode {
+    /// Без probe — кодируем всё (безопасный дефолт, играет всегда).
+    pub fn from_probe(info: Option<&CodecInfo>) -> Self {
+        match info {
+            None => EncodeMode { video_copy: false, audio_copy: false },
+            Some(i) => EncodeMode {
+                video_copy: i.video.as_deref() == Some("h264"),
+                audio_copy: i.audio.first().map(|t| t.codec == "aac").unwrap_or(false),
+            },
+        }
+    }
+}
+
+/// Быстрый probe: одна попытка, короткий таймаут — для выбора режима транскода
+/// до старта ffmpeg. Не успел (холодный p2p) — кодируем «вслепую», как раньше.
+pub async fn probe_fast(ts_url: &str) -> Result<CodecInfo, String> {
+    let fut = probe_once(ts_url);
+    tokio::time::timeout(Duration::from_secs(8), fut)
+        .await
+        .map_err(|_| "probe timeout".to_string())?
+}
+
+fn envs(key: &str, default: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
 /// ffprobe the live TS url (reads a few MB, then exits). Retries: the engine
 /// sporadically answers 5xx to getstream when many sessions churn.
 pub async fn probe(ts_url: String) -> Result<CodecInfo, String> {
@@ -97,7 +134,7 @@ async fn probe_once(ts_url: &str) -> Result<CodecInfo, String> {
 // аудио-вариантов: плейлисты называются буквально "s???.m3u8", обе дорожки пишутся
 // в один файл — hls.js не может их загрузить. Мультитрек вернуть, только если
 // разобраться с генерацией master вручную.
-fn ffmpeg_args(ts_url: &str, dir: &Path) -> Vec<String> {
+fn ffmpeg_args(ts_url: &str, dir: &Path, mode: EncodeMode) -> Vec<String> {
     let mut a: Vec<String> = vec![
         "-hide_banner".into(),
         "-loglevel".into(),
@@ -108,21 +145,39 @@ fn ffmpeg_args(ts_url: &str, dir: &Path) -> Vec<String> {
         "0:v:0".into(),
         "-map".into(),
         "0:a:0?".into(), // ? = аудио опционально: нет дорожки — не ошибка
-        "-c:v".into(),
-        "libx264".into(),
-        "-preset".into(),
-        "veryfast".into(),
-        "-g".into(),
-        "48".into(),
-        "-sc_threshold".into(),
-        "0".into(),
-        "-c:a".into(),
-        "aac".into(),
-        "-ac".into(),
-        "2".into(),
-        "-b:a".into(),
-        "128k".into(),
     ];
+    if mode.video_copy {
+        // источник уже h264 — только перемотка в контейнер, без перекодирования
+        a.extend(["-c:v".into(), "copy".into()]);
+    } else {
+        a.extend([
+            "-c:v".into(),
+            "libx264".into(),
+            "-preset".into(),
+            envs("FFMPEG_PRESET", "veryfast"), // weak CPU: ultrafast/FFMPEG_SCALE спасают realtime
+            "-g".into(),
+            "48".into(),
+            "-sc_threshold".into(),
+            "0".into(),
+        ]);
+        let scale = envs("FFMPEG_SCALE", "");
+        if !scale.is_empty() {
+            a.extend(["-vf".into(), format!("scale=-2:{scale}")]);
+        }
+    }
+    if mode.audio_copy {
+        // aac уже браузерный; ADTS→ASC без перекодирования, иначе ffmpeg откажется муксить
+        a.extend(["-c:a".into(), "copy".into(), "-bsf:a".into(), "aac_adtstoasc".into()]);
+    } else {
+        a.extend([
+            "-c:a".into(),
+            "aac".into(),
+            "-ac".into(),
+            "2".into(),
+            "-b:a".into(),
+            "128k".into(),
+        ]);
+    }
     a.extend([
         "-f".into(),
         "hls".into(),
@@ -197,11 +252,12 @@ impl Transcodes {
         let permit = Arc::clone(&self.sem).try_acquire_owned().map_err(|_| {
             "transcode limit reached, close other transcodes or raise TRANSCODE_LIMIT".to_string()
         })?;
+        let mode = EncodeMode::from_probe(stream.probe.get());
         let dir = Path::new(tmp_dir).join(&stream.id);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
         let mut child = tokio::process::Command::new("ffmpeg")
-            .args(ffmpeg_args(ts_url, &dir))
+            .args(ffmpeg_args(ts_url, &dir, mode))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
@@ -255,11 +311,45 @@ mod tests {
     #[test]
     #[test]
     fn single_variant_no_var_stream_map() {
-        let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"));
+        let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), EncodeMode { video_copy: false, audio_copy: false });
         // ровно одна аудио-дорожка (опциональная), без var_stream_map/master_pl_name
         assert_eq!(args.iter().filter(|a| a.as_str() == "0:a:0?").count(), 1);
         assert!(!args.iter().any(|a| a.contains("0:a:1")));
         assert!(!args.iter().any(|a| a.contains("var_stream_map") || a.contains("master_pl_name")));
         assert_eq!(args.last().unwrap(), "/tmp/t/master.m3u8");
+    }
+
+    #[test]
+    fn mode_from_probe_chooses_copy() {
+        // без probe — кодируем всё
+        assert_eq!(EncodeMode::from_probe(None), EncodeMode { video_copy: false, audio_copy: false });
+        // hevc/ac3 — перекодируем всё
+        let hevc = CodecInfo {
+            video: Some("hevc".into()),
+            audio: vec![AudioTrack { index: 0, codec: "ac3".into(), lang: None }],
+        };
+        assert_eq!(EncodeMode::from_probe(Some(&hevc)), EncodeMode { video_copy: false, audio_copy: false });
+        // h264/aac — чистый remux, CPU ≈ 0
+        let h264 = CodecInfo {
+            video: Some("h264".into()),
+            audio: vec![AudioTrack { index: 0, codec: "aac".into(), lang: None }],
+        };
+        assert_eq!(EncodeMode::from_probe(Some(&h264)), EncodeMode { video_copy: true, audio_copy: true });
+        // h264 + ac3: видео копируем, аудио кодируем
+        let mixed = CodecInfo {
+            video: Some("h264".into()),
+            audio: vec![AudioTrack { index: 0, codec: "ac3".into(), lang: None }],
+        };
+        assert_eq!(EncodeMode::from_probe(Some(&mixed)), EncodeMode { video_copy: true, audio_copy: false });
+    }
+
+    #[test]
+    fn copy_mode_has_no_encoder_flags() {
+        let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), EncodeMode { video_copy: true, audio_copy: true });
+        assert!(args.windows(2).any(|w| w[0] == "-c:v" && w[1] == "copy"));
+        assert!(args.windows(2).any(|w| w[0] == "-c:a" && w[1] == "copy"));
+        assert!(args.windows(2).any(|w| w[0] == "-bsf:a" && w[1] == "aac_adtstoasc"));
+        // кодировщикам нечего там делать
+        assert!(!args.iter().any(|a| a == "libx264" || a == "aac" || a == "scale=-2:720" || a == "veryfast"));
     }
 }

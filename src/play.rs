@@ -220,9 +220,19 @@ pub async fn browser_master(
             }
         }
     }
-    // Chrome/Firefox (и Safari без passthrough): транскод без probe — ffmpeg стартует
-    // сразу, аудио решается `-map 0:a:0?`. Прежний обязательный probe давал 96с + 503
-    // на холодном p2p-старте и сносил стрим при таймауте.
+    // Chrome/Firefox (и Safari без passthrough): быстрый probe (8с, одна попытка) —
+    // выбрать режим транскода: h264/aac источник перематывается без перекодирования
+    // (CPU ≈ 0 — важно на слабых серверах). Не успел (холодный p2p) — кодируем
+    // «вслепую», как раньше. Аудио без probe решал `-map 0:a:0?`.
+    if s.probe.get().is_none() {
+        match transcode::probe_fast(&app.self_stream_url(&s.id)).await {
+            Ok(info) => {
+                tracing::info!(stream = %s.id, video = ?info.video, "transcode mode from probe");
+                let _ = s.probe.set(info);
+            }
+            Err(e) => tracing::info!(stream = %s.id, err = %e, "probe_fast failed, transcoding blind"),
+        }
+    }
     let t = match app
         .transcodes
         .ensure(&s, &app.self_stream_url(&s.id), &app.cfg.tmp_dir)
@@ -249,8 +259,10 @@ pub async fn browser_master(
     // ждём пока ffmpeg напишет master-плейлист; холодный старт p2p (движок буферизует
     // источник, ffmpeg ждёт SPS/PPS+IDR) занимает до ~2 минут — иначе 504 на старте
     let master = t.dir.join("master.m3u8");
+    let t0 = std::time::Instant::now();
     for i in 0..300 {
         if master.exists() {
+            tracing::info!(stream = %s.id, secs = t0.elapsed().as_secs(), "master.m3u8 ready");
             break;
         }
         // ждём дольше stale_secs — периодически подтверждаем жизнь, иначе janitor
