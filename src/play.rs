@@ -184,8 +184,12 @@ pub async fn browser_master(
         Err(e) => return err(StatusCode::NOT_FOUND, e),
     };
     s.touch(&client_ip(&headers, &addr), &ua(&headers), ClientKind::Browser);
-    let url = s.ts_url().to_string();
+    let url = app.engine.ts_session_url(&s.content);
     let probe = s.probe.get_or_init(|| transcode::probe(url)).await;
+    if probe.is_err() {
+        // не кэшируем неудачу навсегда: сносим стрим, следующий запрос пересоздаст его со свежей сессией движка
+        let _ = app.streams.write().unwrap().remove(&s.id);
+    }
     let info = match probe {
         Ok(i) => i.clone(),
         Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, format!("probe failed: {e}")),

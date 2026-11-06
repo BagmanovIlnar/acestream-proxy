@@ -112,6 +112,12 @@ impl Engine {
         Ok(s)
     }
 
+    /// Sessionless TS url: /ace/getstream (re)starts the playback session on connect,
+    /// unlike the ephemeral playback urls from start() that die with the session.
+    pub fn ts_session_url(&self, content: &str) -> String {
+        format!("{}/ace/getstream?{}", self.base, content_query(content))
+    }
+
     /// Any HTTP answer means the engine is alive.
     pub async fn ping(&self) -> Result<(), String> {
         let url = format!("{}/server_status", self.base);

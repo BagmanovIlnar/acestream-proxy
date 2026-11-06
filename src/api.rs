@@ -270,8 +270,12 @@ pub async fn stream_audio(
         .get_or_start(&id)
         .await
         .map_err(|m| e(StatusCode::NOT_FOUND, m))?;
-    let url = s.ts_url().to_string();
+    let url = app.engine.ts_session_url(&s.content);
     let probe = s.probe.get_or_init(|| transcode::probe(url)).await;
+    if probe.is_err() {
+        // не кэшируем неудачу навсегда: сносим стрим, следующий запрос пересоздаст его со свежей сессией движка
+        let _ = app.streams.write().unwrap().remove(&s.id);
+    }
     match probe {
         Ok(info) => Ok(Json(AudioInfo {
             passthrough: transcode::browser_ok(info),

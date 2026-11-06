@@ -334,7 +334,7 @@ impl App {
 /// remain (stream stays alive for HLS/browser clients). Kills the stream when
 /// the upstream itself dies.
 async fn pump(app: Arc<App>, s: Arc<Stream>) {
-    let url = s.ts_url().to_string();
+    let url = app.engine.ts_session_url(&s.content); // sessionless: survives engine session expiry
     let resp = match app.http.get(&url).send().await {
         Ok(r) if r.status().is_success() => r,
         Ok(r) => {
