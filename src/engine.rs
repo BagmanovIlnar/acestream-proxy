@@ -75,6 +75,21 @@ impl Engine {
     }
 
     pub async fn start(&self, content: &str) -> Result<EngineStream, String> {
+        // движок периодически рвёт соединения/отвечает 5xx под нагрузкой — повторяем
+        let mut last = String::new();
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            match self.start_once(content).await {
+                Ok(s) => return Ok(s),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
+    }
+
+    async fn start_once(&self, content: &str) -> Result<EngineStream, String> {
         let url = format!(
             "{}/ace/getstream?{}&format=json",
             self.base,

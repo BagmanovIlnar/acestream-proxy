@@ -1,5 +1,6 @@
 use crate::state::{App, ClientKind, TsGuard};
 use crate::transcode;
+use crate::util::content_id;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -27,6 +28,16 @@ fn ua(headers: &HeaderMap) -> String {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string()
+}
+
+/// Настоящий Safari (не Chrome/Edge/Opera, которые врут в UA ради совместимости):
+/// только он играет нативный HLS в <video>.
+fn is_safari(ua: &str) -> bool {
+    ua.contains("Safari")
+        && !ua.contains("Chrome")
+        && !ua.contains("Chromium")
+        && !ua.contains("Edg")
+        && !ua.contains("OPR")
 }
 
 fn err(status: StatusCode, msg: impl Into<String>) -> Response {
@@ -194,11 +205,10 @@ pub async fn browser_master(
         Ok(i) => i.clone(),
         Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, format!("probe failed: {e}")),
     };
-    if transcode::browser_ok(&info) {
-        if s.hls_index_url().is_some() {
-            return Redirect::temporary(&format!("/stream/{}/index.m3u8", s.id)).into_response();
-        }
-        return err(StatusCode::NOT_FOUND, "engine provides no HLS for this stream");
+    if transcode::browser_ok(&info) && s.hls_index_url().is_some() && is_safari(&ua(&headers)) {
+        // Safari умеет нативный HLS — отдаём дёшево, без транскода.
+        // Chrome/Firefox врут в canPlayType и нативный HLS не играют: им транскод (MSE берёт только fMP4).
+        return Redirect::temporary(&format!("/stream/{}/index.m3u8", s.id)).into_response();
     }
     let t = match app
         .transcodes
@@ -208,9 +218,10 @@ pub async fn browser_master(
         Ok(t) => t,
         Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, e),
     };
-    // wait until ffmpeg writes the master playlist
+    // ждём пока ffmpeg напишет master-плейлист; движок отдаёт первые кадры с задержкой,
+    // поэтому окно щедрое — иначе 504 на холодном старте
     let master = t.dir.join("master.m3u8");
-    for _ in 0..40 {
+    for _ in 0..120 {
         if master.exists() {
             break;
         }
@@ -232,7 +243,12 @@ pub async fn browser_seg(
     if file.contains("..") {
         return err(StatusCode::BAD_REQUEST, "bad path");
     }
-    let Some(s) = app.find(&id) else {
+    // id в url может быть каналом/контентом/стримом — резолвим как master, иначе сегменты 404
+    let key = match app.resolve_input(&id) {
+        Ok(content) => content_id(&content),
+        Err(_) => id.clone(),
+    };
+    let Some(s) = app.find(&key) else {
         return err(StatusCode::NOT_FOUND, "stream not active");
     };
     s.touch(&client_ip(&headers, &addr), &ua(&headers), ClientKind::Browser);
