@@ -56,6 +56,8 @@ pub struct Stream {
     /// Сдвиг звука в мс (<0 — раньше, >0 — позже); выставляется ?ad= из плеера.
     /// Хранится на стриме: запросы без параметра не сбросят подстройку
     pub audio_delay: AtomicI32,
+    /// Выбранная аудиодорожка (?at=N из плеера), тоже липкая
+    pub audio_track: AtomicI32,
     pub empty_since: Mutex<Option<Instant>>,
 }
 
@@ -340,6 +342,7 @@ impl App {
             probe: OnceCell::new(),
             force_encode: AtomicBool::new(false),
             audio_delay: AtomicI32::new(0),
+            audio_track: AtomicI32::new(0),
             empty_since: Mutex::new(None),
         });
         // ponytail: on a race the loser's engine session is orphaned; engine's own

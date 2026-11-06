@@ -246,6 +246,14 @@ pub async fn browser_master(
     {
         s.audio_delay.store(ad, std::sync::atomic::Ordering::Relaxed);
     }
+    // ?at=N: выбор аудиодорожки для транскода (липкий, как ad)
+    if let Some(at) = q
+        .get("at")
+        .and_then(|v| v.parse::<i32>().ok())
+        .filter(|v| (0..=7).contains(v))
+    {
+        s.audio_track.store(at, std::sync::atomic::Ordering::Relaxed);
+    }
     let t = match app
         .transcodes
         .ensure(&s, &app.self_stream_url(&s.id), &app.cfg.tmp_dir, force_encode)
