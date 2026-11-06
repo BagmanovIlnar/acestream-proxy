@@ -32,7 +32,7 @@ fn now_secs() -> u64 {
 /// Pretty default name for a content string.
 fn default_name(content: &str) -> String {
     let bare = content.trim().trim_start_matches("acestream://");
-    if bare.len() == 32 && bare.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if (bare.len() == 32 || bare.len() == 40) && bare.bytes().all(|b| b.is_ascii_hexdigit()) {
         return format!("Канал {}", &bare[..8]);
     }
     let last = bare.rsplit(['/']).next().unwrap_or(bare);

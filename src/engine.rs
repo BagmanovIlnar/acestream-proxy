@@ -24,10 +24,13 @@ pub struct EngineStream {
 }
 
 /// Build the getstream query part for a content string:
-/// 32-hex => id=..., otherwise (http url / magnet / acestream://) => url=<encoded>.
+/// 32-hex content id / 40-hex infohash => id=..., otherwise (http url / magnet / acestream://) => url=<encoded>.
 pub fn content_query(content: &str) -> String {
     let c = content.trim();
     let c = c.strip_prefix("acestream://").unwrap_or(c);
+    if c.len() == 40 && c.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return format!("infohash={c}"); // engine search results (p2p broadcasts)
+    }
     if c.len() == 32 && c.bytes().all(|b| b.is_ascii_hexdigit()) {
         format!("id={c}")
     } else {
@@ -87,12 +90,17 @@ impl Engine {
         if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
             return Err(format!("engine: {err}"));
         }
-        let mut s: EngineStream =
-            serde_json::from_value(v).map_err(|e| format!("engine response: {e}"))?;
+        // infohash= responses nest fields under "response", id= responses are flat
+        let body = v.get("response").filter(|r| r.is_object()).unwrap_or(&v);
+        let mut s: EngineStream = serde_json::from_value(body.clone())
+            .map_err(|e| format!("engine response: {e}"))?;
         s.playback_url = self.rehost(&s.playback_url);
         s.playback_url_for_external_player = self.rehost(&s.playback_url_for_external_player);
         if s.playback_url.is_empty() && s.playback_url_for_external_player.is_empty() {
-            return Err("engine returned no playback url".into());
+            return Err(format!(
+                "engine returned no playback url: {}",
+                truncate(&text, 300)
+            ));
         }
         Ok(s)
     }
@@ -159,6 +167,7 @@ mod tests {
     #[test]
     fn query_building() {
         assert_eq!(content_query("0123456789abcdef0123456789abcdef"), "id=0123456789abcdef0123456789abcdef");
+        assert_eq!(content_query("c88509fd554d301028625518bebf2376d01156e0"), "infohash=c88509fd554d301028625518bebf2376d01156e0");
         assert_eq!(
             content_query("acestream://0123456789abcdef0123456789abcdef"),
             "id=0123456789abcdef0123456789abcdef"

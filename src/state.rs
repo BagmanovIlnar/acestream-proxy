@@ -171,7 +171,8 @@ impl App {
             return Ok(ch.url);
         }
         let bare = t.strip_prefix("acestream://").unwrap_or(t);
-        if bare.len() == 32 && bare.bytes().all(|b| b.is_ascii_hexdigit()) {
+        // 32-hex content id or 40-hex infohash (engine search results)
+        if (bare.len() == 32 || bare.len() == 40) && bare.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Ok(t.to_string());
         }
         if t.starts_with("http://") || t.starts_with("https://") || t.starts_with("magnet:") {
