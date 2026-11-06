@@ -3,6 +3,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
 use utoipa::ToSchema;
 
@@ -26,11 +27,26 @@ pub fn browser_ok(c: &CodecInfo) -> bool {
     v_ok && a_ok
 }
 
-/// ffprobe the live TS url (reads a few MB, then exits).
+/// ffprobe the live TS url (reads a few MB, then exits). Retries: the engine
+/// sporadically answers 5xx to getstream when many sessions churn.
 pub async fn probe(ts_url: String) -> Result<CodecInfo, String> {
+    let mut last = String::from("unknown");
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+        match probe_once(&ts_url).await {
+            Ok(info) => return Ok(info),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+async fn probe_once(ts_url: &str) -> Result<CodecInfo, String> {
     let out = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         tokio::process::Command::new("ffprobe")
-            .args(["-v", "error", "-print_format", "json", "-show_streams", &ts_url])
+            .args(["-v", "error", "-print_format", "json", "-show_streams", ts_url])
             .output()
             .await
     })
@@ -172,7 +188,7 @@ impl Transcodes {
     }
 
     /// Start (or return the running) transcode for the stream. Requires probe done.
-    pub async fn ensure(&self, stream: &Arc<Stream>, tmp_dir: &str) -> Result<Arc<Transcode>, String> {
+    pub async fn ensure(&self, stream: &Arc<Stream>, ts_url: &str, tmp_dir: &str) -> Result<Arc<Transcode>, String> {
         if let Some(t) = self.get(&stream.id) {
             return Ok(t);
         }
@@ -189,7 +205,7 @@ impl Transcodes {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
         let mut child = tokio::process::Command::new("ffmpeg")
-            .args(ffmpeg_args(stream.ts_url(), &dir, &info))
+            .args(ffmpeg_args(ts_url, &dir, &info))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())

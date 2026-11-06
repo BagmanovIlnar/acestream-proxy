@@ -200,7 +200,11 @@ pub async fn browser_master(
         }
         return err(StatusCode::NOT_FOUND, "engine provides no HLS for this stream");
     }
-    let t = match app.transcodes.ensure(&s, &app.cfg.tmp_dir).await {
+    let t = match app
+        .transcodes
+        .ensure(&s, &app.engine.ts_session_url(&s.content), &app.cfg.tmp_dir)
+        .await
+    {
         Ok(t) => t,
         Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, e),
     };
