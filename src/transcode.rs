@@ -3,6 +3,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
 use utoipa::ToSchema;
@@ -35,11 +36,14 @@ pub struct EncodeMode {
     pub audio_copy: bool,
 }
 
+/// Кодируем всё: надёжный дефолт (без probe и при принудительном транскоде).
+pub const ENCODE_ALL: EncodeMode = EncodeMode { video_copy: false, audio_copy: false };
+
 impl EncodeMode {
     /// Без probe — кодируем всё (безопасный дефолт, играет всегда).
     pub fn from_probe(info: Option<&CodecInfo>) -> Self {
         match info {
-            None => EncodeMode { video_copy: false, audio_copy: false },
+            None => ENCODE_ALL,
             Some(i) => EncodeMode {
                 video_copy: i.video.as_deref() == Some("h264"),
                 audio_copy: i.audio.first().map(|t| t.codec == "aac").unwrap_or(false),
@@ -139,6 +143,10 @@ fn ffmpeg_args(ts_url: &str, dir: &Path, mode: EncodeMode) -> Vec<String> {
         "-hide_banner".into(),
         "-loglevel".into(),
         "warning".into(),
+        // remux тащит мусор источника как есть: выбрасывать битые пакеты,
+        // достраивать PTS — иначе браузерный декодер падает на IPTV-глюках
+        "-fflags".into(),
+        "+genpts+discardcorrupt".into(),
         "-i".into(),
         ts_url.to_string(),
         "-map".into(),
@@ -197,6 +205,8 @@ fn ffmpeg_args(ts_url: &str, dir: &Path, mode: EncodeMode) -> Vec<String> {
 
 pub struct Transcode {
     pub dir: PathBuf,
+    /// Режим, с которым запущен этот ffmpeg: смена режима = перезапуск (см. ensure)
+    pub mode: EncodeMode,
     child: AsyncMutex<tokio::process::Child>,
     _permit: OwnedSemaphorePermit, // held while running: caps concurrent transcodes
 }
@@ -239,20 +249,35 @@ impl Transcodes {
         }
     }
 
-    /// Start (or return the running) transcode for the stream. Requires probe done.
+    /// Start (or return the running) transcode for the stream. force_encode —
+    /// полный транскод даже для h264 (плеер сам просит после битого remux).
     pub async fn ensure(
         &self,
         stream: &Arc<Stream>,
         ts_url: &str,
         tmp_dir: &str,
+        force_encode: bool,
     ) -> Result<Arc<Transcode>, String> {
+        let mode = if force_encode
+            || stream.force_encode.load(Ordering::Relaxed)
+        {
+            if force_encode {
+                stream.force_encode.store(true, Ordering::Relaxed);
+            }
+            ENCODE_ALL
+        } else {
+            EncodeMode::from_probe(stream.probe.get())
+        };
         if let Some(t) = self.get(&stream.id) {
-            return Ok(t);
+            if t.mode == mode {
+                return Ok(t);
+            }
+            // режим сменился (remux ломается о кривой источник) — перезапуск ffmpeg
+            self.kill(&stream.id).await;
         }
         let permit = Arc::clone(&self.sem).try_acquire_owned().map_err(|_| {
             "transcode limit reached, close other transcodes or raise TRANSCODE_LIMIT".to_string()
         })?;
-        let mode = EncodeMode::from_probe(stream.probe.get());
         let dir = Path::new(tmp_dir).join(&stream.id);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
@@ -279,6 +304,7 @@ impl Transcodes {
         }
         let t = Arc::new(Transcode {
             dir: dir.clone(),
+            mode,
             child: AsyncMutex::new(child),
             _permit: permit,
         });

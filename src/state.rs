@@ -5,6 +5,7 @@ use crate::util::{content_id, fnv64};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, OnceCell};
@@ -49,6 +50,9 @@ pub struct Stream {
     pub clients: Mutex<HashMap<u64, Client>>,
     pub pump: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub probe: OnceCell<CodecInfo>, // только успех; неудача не кэшируется (get_or_try_init)
+    /// Плеер просил полный транскод (?enc=1 после битого remux) — помним,
+    /// иначе чужой запрос без параметра откатит стрим в copy и вернёт глитчи
+    pub force_encode: AtomicBool,
     pub empty_since: Mutex<Option<Instant>>,
 }
 
@@ -331,6 +335,7 @@ impl App {
             clients: Mutex::new(HashMap::new()),
             pump: tokio::sync::Mutex::new(None),
             probe: OnceCell::new(),
+            force_encode: AtomicBool::new(false),
             empty_since: Mutex::new(None),
         });
         // ponytail: on a race the loser's engine session is orphaned; engine's own

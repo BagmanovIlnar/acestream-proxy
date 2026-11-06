@@ -196,6 +196,7 @@ pub async fn browser_master(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
     let s = match app.get_or_start(&id).await {
@@ -233,9 +234,12 @@ pub async fn browser_master(
             Err(e) => tracing::info!(stream = %s.id, err = %e, "probe_fast failed, transcoding blind"),
         }
     }
+    // ?enc=1: плеер сам просит полный транскод после битого remux (смена разрешения
+    // / битые кадры в источнике — copy тащит их в браузер, MSE падает)
+    let force_encode = q.get("enc").map(|v| v == "1").unwrap_or(false);
     let t = match app
         .transcodes
-        .ensure(&s, &app.self_stream_url(&s.id), &app.cfg.tmp_dir)
+        .ensure(&s, &app.self_stream_url(&s.id), &app.cfg.tmp_dir, force_encode)
         .await
     {
         Ok(t) => t,
@@ -247,7 +251,7 @@ pub async fn browser_master(
         app.transcodes.kill(&s.id).await;
         match app
             .transcodes
-            .ensure(&s, &app.self_stream_url(&s.id), &app.cfg.tmp_dir)
+            .ensure(&s, &app.self_stream_url(&s.id), &app.cfg.tmp_dir, force_encode)
             .await
         {
             Ok(t) => t,
