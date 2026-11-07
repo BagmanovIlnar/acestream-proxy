@@ -29,16 +29,15 @@ pub fn browser_ok(c: &CodecInfo) -> bool {
 }
 
 /// Кодируем всё: надёжный дефолт (без probe и при принудительном транскоде).
-pub const ENCODE_ALL: EncodeMode = EncodeMode { video_copy: false, audio_copy: false, audio_shift_ms: 0, audio_track: 0 };
+pub const ENCODE_ALL: EncodeMode = EncodeMode { video_copy: false, audio_copy: false, audio_track: 0 };
 
 /// Что ffmpeg делает с дорожками: copy — ничего не кодирует (CPU ≈ 0),
-/// encode — перекодирует для браузера. audio_shift_ms — сдвиг звука (IPTV-каналы
-/// идут с зашитым рассинхроном, у каждого свой — подстраивается плеером).
+/// encode — перекодирует для браузера. audio_track — какая дорожка источника
+/// идёт в транскод (?at=N, выбор в плеере).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct EncodeMode {
     pub video_copy: bool,
     pub audio_copy: bool,
-    pub audio_shift_ms: i32,
     /// какая аудиодорожка источника идёт в транскод (?at=N, выбор в плеере)
     pub audio_track: usize,
 }
@@ -46,16 +45,14 @@ pub struct EncodeMode {
 impl EncodeMode {
     /// Без probe — кодируем всё (безопасный дефолт, играет всегда).
     pub fn from_probe(info: Option<&CodecInfo>) -> Self {
-        let mut m = match info {
+        let m = match info {
             None => ENCODE_ALL,
             Some(i) => EncodeMode {
                 video_copy: i.video.as_deref() == Some("h264"),
                 audio_copy: i.audio.first().map(|t| t.codec == "aac").unwrap_or(false),
-                audio_shift_ms: 0,
                 audio_track: 0,
             },
         };
-        m.audio_shift_ms = 0;
         m
     }
 }
@@ -187,14 +184,8 @@ fn ffmpeg_args(ts_url: &str, dir: &Path, mode: EncodeMode) -> Vec<String> {
     } else {
         // IPTV-источники плывут по аудио-PTS — ресемплер держит звук прилипленным
         // к таймлайну (иначе звук уползает от видео; VLC это молча маскирует)
-        let mut af = String::from("aresample=async=1");
-        // ручная подстройка канала: <0 — звук раньше, >0 — позже (мс)
-        if mode.audio_shift_ms < 0 {
-            af.push_str(&format!(",asetpts=PTS-{}/TB", -(mode.audio_shift_ms as f64) / 1000.0));
-        } else if mode.audio_shift_ms > 0 {
-            af.push_str(&format!(",adelay={}:all=1", mode.audio_shift_ms));
-        }
-        a.extend(["-c:a".into(), "aac".into(), "-af".into(), af, "-ac".into(), "2".into(), "-b:a".into(), "128k".into()]);
+        a.extend(["-c:a".into(), "aac".into(), "-af".into(), "aresample=async=1".into(),
+                  "-ac".into(), "2".into(), "-b:a".into(), "128k".into()]);
     }
     a.extend([
         "-f".into(),
@@ -278,13 +269,8 @@ impl Transcodes {
         } else {
             EncodeMode::from_probe(stream.probe.get())
         };
-        // подстройка звука (?ad=) и дорожка (?at=) — влияние на режим: смена = перезапуск ffmpeg
-        mode.audio_shift_ms = stream.audio_delay.load(Ordering::Relaxed);
+        // дорожка (?at=) — влияние на режим: сменилась = перезапуск ffmpeg
         mode.audio_track = stream.audio_track.load(Ordering::Relaxed).max(0) as usize;
-        // сдвинутое аудио нельзя копировать: перекодируем, даже если источник aac
-        if mode.audio_shift_ms != 0 {
-            mode.audio_copy = false;
-        }
         if let Some(t) = self.get(&stream.id) {
             if t.mode == mode {
                 return Ok(t);
@@ -354,7 +340,7 @@ mod tests {
     #[test]
     #[test]
     fn single_variant_no_var_stream_map() {
-        let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), EncodeMode { video_copy: false, audio_copy: false, audio_shift_ms: 0, audio_track: 0 });
+        let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), EncodeMode { video_copy: false, audio_copy: false, audio_track: 0 });
         // ровно одна аудио-дорожка (опциональная), без var_stream_map/master_pl_name
         assert_eq!(args.iter().filter(|a| a.as_str() == "0:a:0?").count(), 1);
         assert!(!args.iter().any(|a| a.contains("0:a:1")));
@@ -365,30 +351,30 @@ mod tests {
     #[test]
     fn mode_from_probe_chooses_copy() {
         // без probe — кодируем всё
-        assert_eq!(EncodeMode::from_probe(None), EncodeMode { video_copy: false, audio_copy: false, audio_shift_ms: 0, audio_track: 0 });
+        assert_eq!(EncodeMode::from_probe(None), EncodeMode { video_copy: false, audio_copy: false, audio_track: 0 });
         // hevc/ac3 — перекодируем всё
         let hevc = CodecInfo {
             video: Some("hevc".into()),
             audio: vec![AudioTrack { index: 0, codec: "ac3".into(), lang: None }],
         };
-        assert_eq!(EncodeMode::from_probe(Some(&hevc)), EncodeMode { video_copy: false, audio_copy: false, audio_shift_ms: 0, audio_track: 0 });
+        assert_eq!(EncodeMode::from_probe(Some(&hevc)), EncodeMode { video_copy: false, audio_copy: false, audio_track: 0 });
         // h264/aac — чистый remux, CPU ≈ 0
         let h264 = CodecInfo {
             video: Some("h264".into()),
             audio: vec![AudioTrack { index: 0, codec: "aac".into(), lang: None }],
         };
-        assert_eq!(EncodeMode::from_probe(Some(&h264)), EncodeMode { video_copy: true, audio_copy: true, audio_shift_ms: 0, audio_track: 0 });
+        assert_eq!(EncodeMode::from_probe(Some(&h264)), EncodeMode { video_copy: true, audio_copy: true, audio_track: 0 });
         // h264 + ac3: видео копируем, аудио кодируем
         let mixed = CodecInfo {
             video: Some("h264".into()),
             audio: vec![AudioTrack { index: 0, codec: "ac3".into(), lang: None }],
         };
-        assert_eq!(EncodeMode::from_probe(Some(&mixed)), EncodeMode { video_copy: true, audio_copy: false, audio_shift_ms: 0, audio_track: 0 });
+        assert_eq!(EncodeMode::from_probe(Some(&mixed)), EncodeMode { video_copy: true, audio_copy: false, audio_track: 0 });
     }
 
     #[test]
     fn copy_mode_has_no_encoder_flags() {
-        let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), EncodeMode { video_copy: true, audio_copy: true, audio_shift_ms: 0, audio_track: 0 });
+        let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), EncodeMode { video_copy: true, audio_copy: true, audio_track: 0 });
         assert!(args.windows(2).any(|w| w[0] == "-c:v" && w[1] == "copy"));
         assert!(args.windows(2).any(|w| w[0] == "-c:a" && w[1] == "copy"));
         assert!(args.windows(2).any(|w| w[0] == "-bsf:a" && w[1] == "aac_adtstoasc"));
@@ -398,7 +384,7 @@ mod tests {
 
     #[test]
     fn audio_track_is_mapped() {
-        let mut m = EncodeMode { video_copy: true, audio_copy: false, audio_shift_ms: 0, audio_track: 0 };
+        let mut m = EncodeMode { video_copy: true, audio_copy: false, audio_track: 0 };
         let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), m);
         assert!(args.iter().any(|a| a == "0:a:0?"));
         m.audio_track = 2;
@@ -411,9 +397,9 @@ mod tests {
     fn encode_audio_uses_async_resampler() {
         // дрейф аудио-PTS у IPTV: звук кодируется через aresample=async=1,
         // в copy-режиме аудио-фильтров нет
-        let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), EncodeMode { video_copy: true, audio_copy: false, audio_shift_ms: 0, audio_track: 0 });
+        let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), EncodeMode { video_copy: true, audio_copy: false, audio_track: 0 });
         assert!(args.windows(2).any(|w| w[0] == "-af" && w[1] == "aresample=async=1"));
-        let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), EncodeMode { video_copy: true, audio_copy: true, audio_shift_ms: 0, audio_track: 0 });
+        let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), EncodeMode { video_copy: true, audio_copy: true, audio_track: 0 });
         assert!(!args.iter().any(|a| a.contains("aresample")));
     }
 }

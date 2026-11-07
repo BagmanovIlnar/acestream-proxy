@@ -237,15 +237,6 @@ pub async fn browser_master(
     // ?enc=1: плеер сам просит полный транскод после битого remux (смена разрешения
     // / битые кадры в источнике — copy тащит их в браузер, MSE падает)
     let force_encode = q.get("enc").map(|v| v == "1").unwrap_or(false);
-    // ?ad=<мс>: сдвиг звука канала (<0 — раньше, >0 — позже). Запоминаем на стриме:
-    // запросы без параметра (другие зрители/плейлист) подстройку не сбросят
-    if let Some(ad) = q
-        .get("ad")
-        .and_then(|v| v.parse::<i32>().ok())
-        .filter(|v| (-10_000..=10_000).contains(v))
-    {
-        s.audio_delay.store(ad, std::sync::atomic::Ordering::Relaxed);
-    }
     // ?at=N: выбор аудиодорожки для транскода (липкий, как ad)
     if let Some(at) = q
         .get("at")
