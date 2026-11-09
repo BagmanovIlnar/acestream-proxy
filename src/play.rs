@@ -244,6 +244,7 @@ pub async fn hls_seg(
 fn disk_mime(p: &PathBuf) -> &'static str {
     match p.extension().and_then(|e| e.to_str()).unwrap_or("") {
         "m3u8" => "application/vnd.apple.mpegurl",
+        "ts" => "video/mp2t",
         "m4s" => "video/iso.segment",
         _ => "video/mp4",
     }
@@ -284,24 +285,47 @@ pub async fn browser_master(
         &ua(&headers),
         ClientKind::Browser,
     );
-    // Safari: нативный HLS дешевле транскода, но нужен probe. Probe здесь НЕ блокирует
-    // остальных — Chrome/Firefox сразу уходят в транскод ниже, не дожидаясь ffprobe.
-    if is_safari(&ua(&headers)) {
-        let url = app.self_stream_url(&s.id);
-        // get_or_try_init: неудача probe не кэшируется навсегда, стрим НЕ сносим —
-        // сорванный probe не повод убивать сессию у всех зрителей. Safari остаётся
-        // только в транскоде.
-        if let Ok(info) = s.probe.get_or_try_init(|| transcode::probe(url)).await {
+    // ?enc=1: плеер просит полный транскод после битого passthrough/remux
+    let force_encode = q.get("enc").map(|v| v == "1").unwrap_or(false);
+    // ?at=N: выбор аудиодорожки для транскода
+    if let Some(at) = q
+        .get("at")
+        .and_then(|v| v.parse::<i32>().ok())
+        .filter(|v| (0..=7).contains(v))
+    {
+        s.audio_track.store(at, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    let input = app.ffmpeg_input_url(&s);
+    // h264+aac → отдать HLS движка как есть (hls.js и Safari). Без ffmpeg нет
+    // разъезда A/V. ?enc=1 принудительно уходит в транскод ниже.
+    if !force_encode {
+        if s.probe.get().is_none() {
+            // Safari терпелив к длинному probe; остальные — probe_fast 8с
+            if is_safari(&ua(&headers)) {
+                let url = app.self_stream_url(&s.id);
+                let _ = s
+                    .probe
+                    .get_or_try_init(|| transcode::probe(url))
+                    .await;
+            } else {
+                match transcode::probe_fast(&input).await {
+                    Ok(info) => {
+                        tracing::info!(stream = %s.id, video = ?info.video, input = %input, "probe ok");
+                        let _ = s.probe.set(info);
+                    }
+                    Err(e) => tracing::info!(stream = %s.id, err = %e, "probe_fast failed"),
+                }
+            }
+        }
+        if let Some(info) = s.probe.get() {
             if transcode::browser_ok(info) && s.hls_index_url().is_some() {
+                tracing::info!(stream = %s.id, "browser passthrough → engine HLS");
                 return Redirect::temporary(&format!("/stream/{}/index.m3u8", s.id)).into_response();
             }
         }
     }
-    // Chrome/Firefox (и Safari без passthrough): быстрый probe (8с, одна попытка) —
-    // выбрать режим транскода: h264/aac источник перематывается без перекодирования
-    // (CPU ≈ 0 — важно на слабых серверах). Не успел (холодный p2p) — кодируем
-    // «вслепую», как раньше. Вход — HLS движка если есть (A+V в сегменте).
-    let input = app.ffmpeg_input_url(&s);
+    // иначе транскод: вход HLS движка если есть, иначе TS
     if s.probe.get().is_none() {
         match transcode::probe_fast(&input).await {
             Ok(info) => {
@@ -310,17 +334,6 @@ pub async fn browser_master(
             }
             Err(e) => tracing::info!(stream = %s.id, err = %e, "probe_fast failed, transcoding blind"),
         }
-    }
-    // ?enc=1: плеер сам просит полный транскод после битого remux (смена разрешения
-    // / битые кадры в источнике — copy тащит их в браузер, MSE падает)
-    let force_encode = q.get("enc").map(|v| v == "1").unwrap_or(false);
-    // ?at=N: выбор аудиодорожки для транскода (липкий, как ad)
-    if let Some(at) = q
-        .get("at")
-        .and_then(|v| v.parse::<i32>().ok())
-        .filter(|v| (0..=7).contains(v))
-    {
-        s.audio_track.store(at, std::sync::atomic::Ordering::Relaxed);
     }
     let t = match app
         .transcodes
