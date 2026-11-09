@@ -146,50 +146,72 @@ async fn probe_once(ts_url: &str) -> Result<CodecInfo, String> {
     Ok(CodecInfo { video, audio })
 }
 
-// ponytail: одна варианта (video + выбранная аудиодорожка)
-// (video + первая аудиодорожка). ffmpeg 5/9 с var_stream_map не резолвит %v для
-// аудио-вариантов: плейлисты называются буквально "s???.m3u8", обе дорожки пишутся
-// в один файл — hls.js не может их загрузить. Мультитрек вернуть, только если
-// разобраться с генерацией master вручную.
-fn ffmpeg_args(ts_url: &str, dir: &Path, mode: EncodeMode) -> Vec<String> {
+// ponytail: одна варианта (video + выбранная аудиодорожка).
+// ffmpeg 5/9 с var_stream_map не резолвит %v для аудио-вариантов: плейлисты
+// называются буквально "s???.m3u8" — мультитрек в HLS невоспроизводим.
+//
+// Вход предпочтительно HLS движка (сегмент уже mux A+V): сохраняем PTS (`-copyts`),
+// не пересобираем таймлайн через genpts/first_pts. TS — запасной путь.
+fn ffmpeg_args(input_url: &str, dir: &Path, mode: EncodeMode) -> Vec<String> {
+    let hls_in = input_url.contains(".m3u8");
     let mut a: Vec<String> = vec![
         "-hide_banner".into(),
         "-loglevel".into(),
         "warning".into(),
-        // Ace Stream / MPEG-TS: аудиочасто появляется позже видео в PMT.
-        // Без длинного probe ffmpeg открывает вход «video-only» и из-за
-        // `-map 0:a:N?` молча отдаёт HLS без звука.
-        "-analyzeduration".into(),
-        "10000000".into(),
-        "-probesize".into(),
-        "10000000".into(),
-        // remux тащит мусор источника как есть: выбрасывать битые пакеты,
-        // достраивать PTS, игнор битых DTS — иначе браузерный декодер падает
-        "-fflags".into(),
-        "+genpts+discardcorrupt+igndts".into(),
-        "-i".into(),
-        ts_url.to_string(),
-        "-map".into(),
-        "0:v:0".into(),
-        "-map".into(),
-        format!("0:a:{}?", mode.audio_track), // ? = нет такой дорожки — не ошибка
-        // видео-encode буферизует сильнее аудио — без очереди muxer дропает звук
-        "-max_muxing_queue_size".into(),
-        "9999".into(),
-        // общая шкала с нуля, как у прямой отдачи (без гигантских PTS из TS)
-        "-avoid_negative_ts".into(),
-        "make_zero".into(),
     ];
+    if hls_in {
+        // сегменты движка уже содержат A+V на общей шкале — короткий probe,
+        // без genpts (он как раз разводит звук и картинку на live TS)
+        a.extend([
+            "-analyzeduration".into(),
+            "5000000".into(),
+            "-probesize".into(),
+            "5000000".into(),
+            "-fflags".into(),
+            "+discardcorrupt".into(),
+            "-live_start_index".into(),
+            "-2".into(),
+            "-i".into(),
+            input_url.to_string(),
+            "-map".into(),
+            "0:v:0".into(),
+            "-map".into(),
+            format!("0:a:{}?", mode.audio_track),
+            "-max_muxing_queue_size".into(),
+            "9999".into(),
+            // сохранить относительный A/V offset источника; сдвиг к нулю — общий
+            "-copyts".into(),
+            "-start_at_zero".into(),
+        ]);
+    } else {
+        // Ace Stream / MPEG-TS: аудиочасто появляется позже видео в PMT.
+        a.extend([
+            "-analyzeduration".into(),
+            "10000000".into(),
+            "-probesize".into(),
+            "10000000".into(),
+            "-fflags".into(),
+            "+genpts+discardcorrupt+igndts".into(),
+            "-i".into(),
+            input_url.to_string(),
+            "-map".into(),
+            "0:v:0".into(),
+            "-map".into(),
+            format!("0:a:{}?", mode.audio_track),
+            "-max_muxing_queue_size".into(),
+            "9999".into(),
+            "-avoid_negative_ts".into(),
+            "make_zero".into(),
+        ]);
+    }
     if mode.video_copy {
-        // источник уже h264 — только перемотка в контейнер, без перекодирования
         a.extend(["-c:v".into(), "copy".into()]);
     } else {
         a.extend([
             "-c:v".into(),
             "libx264".into(),
             "-preset".into(),
-            envs("FFMPEG_PRESET", "veryfast"), // weak CPU: ultrafast/FFMPEG_SCALE спасают realtime
-            // меньше задержка энкодера → звук сам держится у картинки (live)
+            envs("FFMPEG_PRESET", "veryfast"),
             "-tune".into(),
             "zerolatency".into(),
             "-g".into(),
@@ -203,17 +225,20 @@ fn ffmpeg_args(ts_url: &str, dir: &Path, mode: EncodeMode) -> Vec<String> {
         }
     }
     if mode.audio_copy {
-        // aac уже браузерный; ADTS→ASC без перекодирования, иначе ffmpeg откажется муксить
-        a.extend(["-c:a".into(), "copy".into(), "-bsf:a".into(), "aac_adtstoasc".into()]);
+        a.extend([
+            "-c:a".into(),
+            "copy".into(),
+            "-bsf:a".into(),
+            "aac_adtstoasc".into(),
+        ]);
     } else {
-        // Автосинхрон как при прямой отдаче: растягиваем/сжимаем аудио к PTS
-        // видео (async=1000 — до 1000 сэмплов/с компенсации дрейфа IPTV),
-        // first_pts=0 — старт вместе с видео на общей шкале.
+        // лёгкая подтяжка дрейфа; без first_pts=0 — он сбрасывал звук на 0
+        // отдельно от видео и давал стабильное «отставание»
         a.extend([
             "-c:a".into(),
             "aac".into(),
             "-af".into(),
-            "aresample=async=1000:first_pts=0".into(),
+            "aresample=async=1".into(),
             "-ac".into(),
             "2".into(),
             "-b:a".into(),
@@ -228,14 +253,13 @@ fn ffmpeg_args(ts_url: &str, dir: &Path, mode: EncodeMode) -> Vec<String> {
         "-f".into(),
         "hls".into(),
         "-hls_time".into(),
-        "4".into(),
+        "2".into(),
         "-hls_list_size".into(),
         "6".into(),
         "-hls_flags".into(),
         "delete_segments+independent_segments".into(),
         "-hls_segment_type".into(),
         "fmp4".into(),
-        // одна варианта: master.m3u8 = медиа-плейлист, никаких var_stream_map
         dir.join("master.m3u8").to_string_lossy().into_owned(),
     ]);
     a
@@ -356,7 +380,13 @@ impl Transcodes {
             .lock()
             .unwrap()
             .insert(stream.id.clone(), t.clone());
-        tracing::info!(stream = %stream.id, "transcode started -> {}", dir.display());
+        tracing::info!(
+            stream = %stream.id,
+            input = %ts_url,
+            hls_in = ts_url.contains(".m3u8"),
+            "transcode started -> {}",
+            dir.display()
+        );
         Ok(t)
     }
 
@@ -390,6 +420,23 @@ mod tests {
         assert!(args.windows(2).any(|w| w[0] == "-analyzeduration" && w[1] == "10000000"));
         assert!(args.windows(2).any(|w| w[0] == "-probesize" && w[1] == "10000000"));
         assert!(args.windows(2).any(|w| w[0] == "-max_muxing_queue_size" && w[1] == "9999"));
+        assert!(args.iter().any(|a| a == "+genpts+discardcorrupt+igndts"));
+        assert!(!args.iter().any(|a| a == "-copyts"));
+    }
+
+    #[test]
+    fn hls_input_preserves_timestamps() {
+        let args = ffmpeg_args(
+            "http://x/stream/1/index.m3u8",
+            Path::new("/tmp/t"),
+            EncodeMode { video_copy: false, audio_copy: false, audio_track: 0 },
+        );
+        assert!(args.iter().any(|a| a == "-copyts"));
+        assert!(args.iter().any(|a| a == "-start_at_zero"));
+        assert!(args.windows(2).any(|w| w[0] == "-live_start_index" && w[1] == "-2"));
+        assert!(args.iter().any(|a| a == "+discardcorrupt"));
+        assert!(!args.iter().any(|a| a.contains("genpts")));
+        assert!(!args.iter().any(|a| a == "make_zero"));
     }
 
     #[test]
@@ -445,10 +492,9 @@ mod tests {
 
     #[test]
     fn encode_audio_uses_async_resampler() {
-        // автосинхрон к видео: aresample=async=1000:first_pts=0;
-        // в copy-режиме аудио-фильтров нет
+        // лёгкая подтяжка дрейфа; first_pts=0 убран — ломал A/V
         let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), EncodeMode { video_copy: true, audio_copy: false, audio_track: 0 });
-        assert!(args.windows(2).any(|w| w[0] == "-af" && w[1] == "aresample=async=1000:first_pts=0"));
+        assert!(args.windows(2).any(|w| w[0] == "-af" && w[1] == "aresample=async=1"));
         let args = ffmpeg_args("http://x/stream/1", Path::new("/tmp/t"), EncodeMode { video_copy: true, audio_copy: true, audio_track: 0 });
         assert!(!args.iter().any(|a| a.contains("aresample")));
     }

@@ -44,6 +44,26 @@ fn err(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, msg.into()).into_response()
 }
 
+#[cfg(test)]
+mod rewrite_tests {
+    use super::rewrite_hls_uris;
+
+    #[test]
+    fn strips_hls_dir_prefix() {
+        let dir = "http://127.0.0.1:6878/ace/hlc/abc/";
+        let body = "#EXTM3U\n#EXTINF:2,\nhttp://127.0.0.1:6878/ace/hlc/abc/seg0.ts\n";
+        let out = rewrite_hls_uris(body, dir);
+        assert!(out.contains("seg0.ts"));
+        assert!(!out.contains("127.0.0.1:6878"));
+    }
+
+    #[test]
+    fn keeps_relative_and_tags() {
+        let body = "#EXTM3U\n#EXTINF:2,\nseg1.ts\n";
+        assert_eq!(rewrite_hls_uris(body, "http://x/"), body.trim_end());
+    }
+}
+
 /// GET /stream/{id} — direct MPEG-TS pass-through (VLC, Smart TV, players).
 pub async fn ts(
     State(app): State<Arc<App>>,
@@ -124,6 +144,58 @@ async fn proxy_url(app: &App, url: &str, force_m3u8: bool) -> Response {
     }
 }
 
+/// Абсолютные URL сегментов движка → относительные пути под `/stream/{id}/…`,
+/// чтобы ffmpeg/браузер ходили через прокси (одна сессия), а не напрямую в движок.
+fn rewrite_hls_uris(body: &str, hls_dir: &str) -> String {
+    body.lines()
+        .map(|line| {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('#') {
+                return line.to_string();
+            }
+            if !hls_dir.is_empty() {
+                if let Some(rest) = t.strip_prefix(hls_dir) {
+                    return rest.to_string();
+                }
+            }
+            if t.starts_with("http://") || t.starts_with("https://") {
+                if let Some(i) = t.rfind('/') {
+                    return t[i + 1..].to_string();
+                }
+            }
+            line.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+async fn proxy_hls_playlist(app: &App, url: &str, hls_dir: &str) -> Response {
+    let resp = match app.http.get(url).send().await {
+        Err(_) => app.http.get(url).send().await,
+        ok => ok,
+    };
+    match resp {
+        Ok(r) if r.status().is_success() => match r.bytes().await {
+            Ok(b) => {
+                let raw = String::from_utf8_lossy(&b);
+                let body = rewrite_hls_uris(&raw, hls_dir);
+                (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "application/vnd.apple.mpegurl"),
+                        (header::CACHE_CONTROL, "no-store"),
+                    ],
+                    body,
+                )
+                    .into_response()
+            }
+            Err(e) => err(StatusCode::BAD_GATEWAY, e.to_string()),
+        },
+        Ok(r) => err(StatusCode::BAD_GATEWAY, format!("engine: {}", r.status())),
+        Err(er) => err(StatusCode::BAD_GATEWAY, er.to_string()),
+    }
+}
+
 /// GET /stream/{id}/index.m3u8 — engine HLS playlist, pass-through.
 pub async fn hls_index(
     State(app): State<Arc<App>>,
@@ -143,7 +215,8 @@ pub async fn hls_index(
         );
     }
     let url = s.hls_index_url().unwrap().to_string();
-    proxy_url(&app, &url, true).await
+    let dir = s.hls_dir();
+    proxy_hls_playlist(&app, &url, &dir).await
 }
 
 /// GET /stream/{id}/{seg} — engine HLS segments/variant playlists, pass-through.
@@ -162,6 +235,9 @@ pub async fn hls_seg(
     };
     s.touch(&client_ip(&headers, &addr), &ua(&headers), ClientKind::Hls);
     let url = format!("{}{seg}", s.hls_dir());
+    if seg.contains(".m3u8") {
+        return proxy_hls_playlist(&app, &url, &s.hls_dir()).await;
+    }
     proxy_url(&app, &url, false).await
 }
 
@@ -224,11 +300,12 @@ pub async fn browser_master(
     // Chrome/Firefox (и Safari без passthrough): быстрый probe (8с, одна попытка) —
     // выбрать режим транскода: h264/aac источник перематывается без перекодирования
     // (CPU ≈ 0 — важно на слабых серверах). Не успел (холодный p2p) — кодируем
-    // «вслепую», как раньше. Аудио без probe решал `-map 0:a:0?`.
+    // «вслепую», как раньше. Вход — HLS движка если есть (A+V в сегменте).
+    let input = app.ffmpeg_input_url(&s);
     if s.probe.get().is_none() {
-        match transcode::probe_fast(&app.self_stream_url(&s.id)).await {
+        match transcode::probe_fast(&input).await {
             Ok(info) => {
-                tracing::info!(stream = %s.id, video = ?info.video, "transcode mode from probe");
+                tracing::info!(stream = %s.id, video = ?info.video, input = %input, "transcode mode from probe");
                 let _ = s.probe.set(info);
             }
             Err(e) => tracing::info!(stream = %s.id, err = %e, "probe_fast failed, transcoding blind"),
@@ -247,7 +324,7 @@ pub async fn browser_master(
     }
     let t = match app
         .transcodes
-        .ensure(&s, &app.self_stream_url(&s.id), &app.cfg.tmp_dir, force_encode)
+        .ensure(&s, &input, &app.cfg.tmp_dir, force_encode)
         .await
     {
         Ok(t) => t,
@@ -259,7 +336,7 @@ pub async fn browser_master(
         app.transcodes.kill(&s.id).await;
         match app
             .transcodes
-            .ensure(&s, &app.self_stream_url(&s.id), &app.cfg.tmp_dir, force_encode)
+            .ensure(&s, &app.ffmpeg_input_url(&s), &app.cfg.tmp_dir, force_encode)
             .await
         {
             Ok(t) => t,

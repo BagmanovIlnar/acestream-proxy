@@ -318,6 +318,20 @@ impl App {
         format!("http://127.0.0.1:{}/stream/{id}", self.cfg.port)
     }
 
+    /// Вход для ffmpeg/ffprobe: HLS движка (сегмент уже с видео+звуком и общей
+    /// PTS), иначе TS fan-out. HLS предпочтительнее — нет пересборки таймлайна
+    /// из continuous MPEG-TS, звук меньше уезжает от картинки.
+    pub fn ffmpeg_input_url(&self, s: &Stream) -> String {
+        if s.hls_index_url().is_some() {
+            format!(
+                "http://127.0.0.1:{}/stream/{}/index.m3u8",
+                self.cfg.port, s.id
+            )
+        } else {
+            self.self_stream_url(&s.id)
+        }
+    }
+
     /// Get or create the engine session for the input (any of resolve_input forms).
     pub async fn get_or_start(&self, input: &str) -> Result<Arc<Stream>, String> {
         let content = self.resolve_input(input)?;
